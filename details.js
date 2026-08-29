@@ -11,7 +11,7 @@ async function load(){
  const d=await browser.storage.local.get(["apiKey"]);apiKey=d.apiKey||"";if(!apiKey){$("chartStatus").textContent="Add your API key from the BearFish popup first.";return}
  $("loadBtn").disabled=true;$("chartStatus").textContent="Loading…";
  try{const [interval,size]=cfg[range],u=new URL("https://api.twelvedata.com/time_series");u.searchParams.set("symbol",symbol);u.searchParams.set("interval",interval);u.searchParams.set("outputsize",size);u.searchParams.set("apikey",apiKey);
-  const {r,d:x}=await globalThis.BearFishRateLimit.limitedJson(u,{storage:browser.storage.local,onWait:({waitMs})=>$("chartStatus").textContent=`API limit reached — waiting ${Math.ceil(waitMs/1000)}s…`});if(!r.ok||x.status==="error"||!Array.isArray(x.values))throw Error(x.message||"Unable to load data");
+  const {r,d:x}=await globalThis.BearFishRateLimit.limitedJson(u,{runtime:browser.runtime,storage:browser.storage.local,onWait:({waitMs})=>$("chartStatus").textContent=`API limit reached — waiting ${Math.ceil(waitMs/1000)}s…`});if(!r.ok||x.status==="error"||!Array.isArray(x.values))throw Error(x.message||"Unable to load data");
   series=[...x.values].reverse().map(v=>({t:v.datetime,o:+v.open,h:+v.high,l:+v.low,c:+v.close,v:+(v.volume||0)})).filter(x=>[x.o,x.h,x.l,x.c].every(Number.isFinite));
   $("meta").textContent=`${x.meta?.interval||interval} · ${series.length} bars`;$("last").textContent=money(series.at(-1)?.c);
   const ch=series.length>1?(series.at(-1).c-series[0].c)/series[0].c*100:NaN;$("change").textContent=Number.isFinite(ch)?`${ch>=0?"+":""}${ch.toFixed(2)}%`:"—";

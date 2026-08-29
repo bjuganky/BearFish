@@ -14,6 +14,7 @@ const restLimiter=globalThis.BearFishRateLimit;
 function limitedJson(url){
  const task=apiQueue.then(async()=>{
  return restLimiter.limitedJson(url,{
+  runtime:browser.runtime,
   storage:browser.storage.local,
   onWait:({waitMs})=>{const secs=Math.ceil(waitMs/1000),st=$("status");if(st)st.textContent=`API limit reached — waiting ${secs}s…`}
  })
