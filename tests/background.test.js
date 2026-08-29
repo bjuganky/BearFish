@@ -146,6 +146,84 @@ test("AlertStore serializes a monitor patch issued while a UI write is still in 
  assert.equal(finalList[0].lastMet, true, "the evaluation patch still lands");
 });
 
+test("evaluateAndPatch is one atomic operation: a concurrent disable queued behind it cannot land between its read and its write", async () => {
+ const storage = new GatedStorage();
+ const store = createAlertStore(storage, alertsLib);
+
+ const setup = store.addAlert("AAPL", { type: "price_above", value: 100 });
+ await storage.releaseWhenGated();
+ const added = await setup;
+ const alertId = added.alert.id;
+
+ // First observation just arms the alert (no notify), matching the real
+ // monitor's first-scan semantics, so the *next* evaluation can transition
+ // unmet -> met and be eligible to notify.
+ const arm = store.evaluateAndPatch("AAPL", alertId, () => 90);
+ await storage.releaseWhenGated();
+ const armed = await arm;
+ assert.equal(armed.skipped, false);
+ assert.equal(armed.notify, false);
+
+ // The evaluate+persist decision for a genuine crossing begins: read,
+ // evaluate (decides to notify), and only then is its storage.set()
+ // gated/paused.
+ const evaluation = store.evaluateAndPatch("AAPL", alertId, () => 105);
+
+ // While that single queued operation's write is still pending, a "UI"
+ // disable is issued. Because evaluateAndPatch's read-evaluate-write is
+ // one queued task, this disable cannot be interleaved between its read
+ // and its write -- it can only run strictly after the evaluation's own
+ // write has fully completed.
+ const uiDisable = store.setEnabled("AAPL", alertId, false);
+
+ await storage.releaseWhenGated(); // the evaluation's own write proceeds first
+ await storage.releaseWhenGated(); // the disable's write proceeds, queued behind it
+
+ const [result] = await Promise.all([evaluation, uiDisable]);
+
+ assert.equal(result.skipped, false);
+ assert.equal(result.notify, true, "the crossing that was already enabled at evaluation time still notifies");
+
+ const finalList = await store.listAlerts("AAPL");
+ assert.equal(finalList[0].enabled, false, "the disable still takes effect, just strictly after the evaluation committed");
+ assert.equal(finalList[0].lastMet, true, "the committed evaluation's state is not lost either");
+});
+
+test("evaluateAndPatch is one atomic operation: a concurrent definition edit queued behind it is not applied mid-evaluation", async () => {
+ const storage = new GatedStorage();
+ const store = createAlertStore(storage, alertsLib);
+
+ const setup = store.addAlert("AAPL", { type: "price_above", value: 100 });
+ await storage.releaseWhenGated();
+ const added = await setup;
+ const alertId = added.alert.id;
+
+ const arm = store.evaluateAndPatch("AAPL", alertId, () => 90);
+ await storage.releaseWhenGated();
+ await arm;
+
+ // The evaluation for a crossing above 100 begins and pauses on its write.
+ const evaluation = store.evaluateAndPatch("AAPL", alertId, () => 105);
+
+ // Concurrently, the "UI" raises the threshold to 1000 -- if this could
+ // land between the evaluation's read and write, the committed evaluation
+ // could end up mixed with the new definition. It must instead queue
+ // strictly behind the evaluation.
+ const uiEdit = store.updateAlert("AAPL", alertId, { type: "price_above", value: 1000 });
+
+ await storage.releaseWhenGated(); // the evaluation's own write proceeds first
+ await storage.releaseWhenGated(); // the edit's write proceeds, queued behind it
+
+ const [result] = await Promise.all([evaluation, uiEdit]);
+
+ assert.equal(result.skipped, false);
+ assert.equal(result.notify, true, "evaluated and notified against the definition current at evaluation time (value: 100)");
+ assert.equal(result.alert.value, 100, "the committed evaluation reflects the pre-edit definition, not a mix of old and new");
+
+ const finalList = await store.listAlerts("AAPL");
+ assert.equal(finalList[0].value, 1000, "the edit still takes effect, just strictly after the evaluation committed");
+});
+
 test("AlertStore never resurrects a deleted alert even when a patch for it is queued right behind the delete", async () => {
  const storage = new MockStorage();
  const store = createAlertStore(storage, alertsLib);

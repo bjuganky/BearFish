@@ -189,7 +189,11 @@
    },
 
    /* Monitor-only: fetch the current definition + evaluation state for one
-      alert id, or null if it no longer exists (deleted concurrently). */
+      alert id, or null if it no longer exists (deleted concurrently). Only
+      used for diagnostics/tests -- the monitor's actual read-evaluate-write
+      decision goes through evaluateAndPatch() below, as a single serialized
+      operation, so nothing can be interleaved between the read and the
+      write of a scan's transition. */
    getAlert(symbol, alertId) {
     return enqueue(() => {
      const found = (cache[symbol] || []).find((a) => a.id === alertId);
@@ -199,7 +203,9 @@
 
    /* Monitor-only: apply an evaluation patch iff the alert still exists;
       returns the merged alert, or null if it was deleted/edited away
-      concurrently (never resurrects a deleted alert). */
+      concurrently (never resurrects a deleted alert). Only used for
+      diagnostics/tests; see evaluateAndPatch() for the atomic path the
+      monitor actually uses. */
    patchEvaluation(symbol, alertId, patch) {
     return enqueue(async () => {
      const list = cache[symbol];
@@ -213,6 +219,42 @@
       cache[symbol] = nextList;
      });
      return { ...updated };
+    });
+   },
+
+   /* Monitor-only: the read (current definition/state), the crossing
+      evaluation, and the write of the resulting evaluation patch all run
+      inside a *single* queued operation, so no other mutation (a UI
+      disable/delete/edit, or another scan) can land between "read" and
+      "write" -- there is no separate getAlert()+patchEvaluation() pair for
+      something else to interleave into. `resolveValue(alert)` must be a
+      synchronous, side-effect-free function of the (possibly stale)
+      planned alert type/rsiPeriod (e.g. a lookup into an already-fetched
+      price/RSI map); it receives the *fresh* alert read inside this same
+      operation, so it always evaluates against the current definition.
+      Returns { skipped: true } if the alert no longer exists, was disabled
+      concurrently, or `resolveValue` yields a non-finite value (e.g. its
+      definition changed to data this cycle didn't fetch). Otherwise
+      returns { skipped: false, notify, alert, currentValue } for the
+      committed transition -- notify() must only ever be called with this
+      result, never with a value computed from a separate earlier read. */
+   evaluateAndPatch(symbol, alertId, resolveValue) {
+    return enqueue(async () => {
+     const list = cache[symbol];
+     if (!list) return { skipped: true };
+     const idx = list.findIndex((a) => a.id === alertId);
+     if (idx === -1) return { skipped: true };
+     const alert = list[idx];
+     if (!alert.enabled) return { skipped: true };
+     const currentValue = resolveValue(alert);
+     if (!Number.isFinite(currentValue)) return { skipped: true };
+     const { alert: updated, notify: shouldNotify } = alertsLib.processAlertUpdate(alert, currentValue);
+     await mutateAndPersist(symbol, () => {
+      const nextList = list.slice();
+      nextList[idx] = updated;
+      cache[symbol] = nextList;
+     });
+     return { skipped: false, notify: shouldNotify, alert: { ...updated }, currentValue };
     });
    }
   };
@@ -258,14 +300,16 @@
  /**
   * Evaluates every enabled alert for one symbol against freshly-fetched
   * price/RSI values. The set of alerts/periods to fetch is only *planned*
-  * from a snapshot; every alert is re-read fresh from the store (via
-  * store.getAlert) immediately before its crossing is computed, so an
-  * edit/delete/disable that happens while the network request is in
-  * flight is always honored -- never a notification computed from a
-  * stale pre-fetch definition. If a concurrent edit changes what data is
-  * needed (e.g. a different RSI period) that wasn't part of this cycle's
-  * fetch plan, that alert is simply skipped for this cycle and picked up
-  * on the next scan, rather than evaluated against mismatched data.
+  * from a snapshot; the actual read of each alert's current definition,
+  * the crossing evaluation, and the persistence of the resulting state all
+  * happen inside one atomic `store.evaluateAndPatch()` call per alert, so
+  * a concurrent disable/delete/edit can never land between "decide to
+  * notify" and "persist that decision" -- notify() is only ever invoked
+  * with the result of that same committed operation. If a concurrent edit
+  * changes what data is needed (e.g. a different RSI period) that wasn't
+  * part of this cycle's fetch plan, that alert is simply skipped for this
+  * cycle and picked up on the next scan, rather than evaluated against
+  * mismatched data.
   */
  async function checkSymbol({ store, alertsLib, reserve, fetchImpl, apiKey, symbol, notify, log }) {
   const planned = await store.enabledAlerts(symbol);
@@ -295,18 +339,12 @@
    return;
   }
 
+  const resolveValue = (alert) => (alertsLib.isRsiType(alert.type) ? rsiByPeriod[alert.rsiPeriod] : priceValue);
+
   for (const plannedAlert of planned) {
-   const latest = await store.getAlert(symbol, plannedAlert.id);
-   if (!latest || !latest.enabled) continue; // deleted/disabled concurrently
-
-   const currentValue = alertsLib.isRsiType(latest.type) ? rsiByPeriod[latest.rsiPeriod] : priceValue;
-   if (!Number.isFinite(currentValue)) continue; // definition changed to data we didn't fetch this cycle; retry next scan
-
-   const { alert: updated, notify: shouldNotify } = alertsLib.processAlertUpdate(latest, currentValue);
-   const patch = { lastMet: updated.lastMet, lastValue: updated.lastValue, lastCheckedAt: updated.lastCheckedAt };
-   let persisted;
+   let result;
    try {
-    persisted = await store.patchEvaluation(symbol, latest.id, patch);
+    result = await store.evaluateAndPatch(symbol, plannedAlert.id, resolveValue);
    } catch (e) {
     // Explicit failure policy: never notify on a transition that failed to persist.
     // The prior (unmet) state stays in the store, so the next scan re-evaluates and
@@ -314,8 +352,8 @@
     if (log) log("BearFish: unable to persist alert state for " + symbol, e && e.message);
     continue;
    }
-   if (!persisted) continue; // alert was deleted concurrently; nothing to notify about
-   if (shouldNotify) await notify(symbol, persisted, currentValue);
+   if (result.skipped) continue; // deleted/disabled/edited away concurrently, or data mismatch
+   if (result.notify) await notify(symbol, result.alert, result.currentValue);
   }
  }
 

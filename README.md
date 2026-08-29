@@ -108,7 +108,12 @@ minutes) only when at least one alert is enabled and an API key is configured:
   flight is honored rather than acted on with stale data; if an edit changes
   what data is needed (e.g. a different RSI period) that wasn't part of the
   current cycle's fetch plan, that alert is simply skipped until the next
-  scan instead of being evaluated against mismatched data.
+  scan instead of being evaluated against mismatched data. That read, the
+  crossing evaluation, and the persistence of the resulting state all run
+  inside one atomic store operation (`evaluateAndPatch`), so a concurrent
+  disable/delete/edit can never land between "decide to notify" and
+  "persist that decision" — a notification is only ever sent for the exact
+  transition that was actually committed to storage.
 - Only one scan runs at a time: if an alarm fires again before the previous
   scan finished (for example because many symbols queued behind the shared
   rate limiter), the overlapping invocation is coalesced into a no-op instead
