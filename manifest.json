@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "BearFish",
+  "version": "0.8.0",
+  "description": "BearFish stock watchlists with indicator presets, safe API pacing, and live-session fallbacks.",
+  "action": {
+    "default_title": "BearFish",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png",
+      "48": "icon-48.png",
+      "96": "icon-96.png"
+    }
+  },
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://api.twelvedata.com/*"
+  ],
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "96": "icon-96.png",
+    "128": "icon-128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "bearfish@example.local",
+      "strict_min_version": "121.0"
+    }
+  }
+}
