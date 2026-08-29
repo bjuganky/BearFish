@@ -63,7 +63,26 @@
   <div id="help-macd" class="help-text hidden">MACD compares a fast EMA with a slower EMA, then smooths their difference with a signal line. It is commonly used to visualize trend and momentum changes.</div>
 </section>
 
+<section class="alerts-section">
+  <div class="section-title">ALERTS</div>
+  <ul id="alertList" class="alert-list"></ul>
+  <div id="alertEmpty" class="description hidden">No alerts for this stock yet.</div>
+  <div class="alert-form">
+    <select id="alertType">
+      <option value="price_above">Price crosses above</option>
+      <option value="price_below">Price crosses below</option>
+      <option value="rsi_above">RSI crosses above</option>
+      <option value="rsi_below">RSI crosses below</option>
+    </select>
+    <input id="alertValue" type="number" step="any" placeholder="Threshold">
+    <input id="alertRsiPeriod" type="number" min="2" max="100" placeholder="RSI period" value="14">
+    <button id="addAlertBtn">add alert</button>
+  </div>
+  <div id="alertStatus" class="description"></div>
+</section>
+
 <footer><span id="status">Changes save automatically.</span></footer>
 </main>
+<script src="alerts.js"></script>
 <script src="indicator.js"></script>
 </body></html>

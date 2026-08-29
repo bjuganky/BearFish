@@ -14,3 +14,13 @@ input,select{background:var(--surface);border:1px solid var(--line);border-radiu
 .help-text{padding:9px 12px;margin:0 0 4px;background:var(--surface2);border-bottom:1px solid var(--line);font-size:11px;line-height:1.45;color:var(--muted)}
 .triple{display:flex;gap:8px}.triple .field input{width:62px}.macd-row{grid-template-columns:90px 1fr 28px}
 .hidden{display:none!important}footer{padding-top:12px;color:var(--muted);font-size:10px}
+.alerts-section{padding:14px 0;border-bottom:1px solid var(--line)}
+.alert-list{list-style:none;margin:8px 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.alert-row{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:3px;padding:7px 9px;font-size:11px}
+.alert-row .alert-desc{flex:1}
+.alert-row button{border:1px solid var(--line);background:var(--surface);border-radius:3px;padding:5px 8px;font-size:10px}
+.alert-form{display:flex;gap:7px;margin-top:8px;flex-wrap:wrap}
+.alert-form select{flex:1 1 150px}
+.alert-form input{width:100px}
+.alert-form button{border:1px solid var(--line);background:var(--surface);border-radius:3px;padding:8px 10px;font-size:11px}
+#alertStatus{margin-top:6px}

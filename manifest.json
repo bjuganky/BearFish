@@ -20,11 +20,16 @@
   },
   "permissions": [
     "storage",
-    "tabs"
+    "tabs",
+    "alarms",
+    "notifications"
   ],
   "host_permissions": [
     "https://api.twelvedata.com/*"
   ],
+  "background": {
+    "scripts": ["alerts.js", "background.js"]
+  },
   "browser_specific_settings": {
     "gecko": {
       "id": "bearfish@example.local",
