@@ -3,7 +3,6 @@
   "version": "0.8.0",
   "description": "BearFish Firefox extension development tooling",
   "private": true,
-  "type": "module",
   "scripts": {
     "firefox": "web-ext run",
     "dev": "web-ext run",
