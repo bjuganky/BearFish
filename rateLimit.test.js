@@ -1,5 +1,7 @@
 const test=require("node:test");
 const assert=require("node:assert/strict");
+const fs=require("node:fs");
+const path=require("node:path");
 const {createReservationService}=require("./background.js");
 
 class MockStorage{
@@ -95,4 +97,10 @@ test("adversarial interleaving cannot double-reserve across concurrent contexts"
  await Promise.all([first,second]);
  const times=(await storage.get(["t7"])).t7;
  assert.equal(times.length,2);
+});
+
+test("manifest registers Firefox MV3 background script handler",()=>{
+ const manifest=JSON.parse(fs.readFileSync(path.join(__dirname,"manifest.json"),"utf8"));
+ assert.ok(Array.isArray(manifest.background?.scripts));
+ assert.ok(manifest.background.scripts.includes("background.js"));
 });
