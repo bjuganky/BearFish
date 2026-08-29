@@ -13,6 +13,11 @@
       "96": "icon-96.png"
     }
   },
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
   "icons": {
     "48": "icon-48.png",
     "96": "icon-96.png",
