@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>BearFish</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body data-theme="graphite">
+<main class="shell">
+  <header>
+    <div class="brandwrap">
+      <img src="bearfish-mark.png" alt="" class="logo">
+      <div>
+        <div class="brand">BEARFISH</div>
+        <div class="brand-sub">MARKET WATCH</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="themeBtn" class="linkbtn" type="button">theme</button>
+      <button id="popoutBtn" class="linkbtn" type="button">pop out</button>
+      <button id="settingsBtn" class="linkbtn" type="button">settings</button>
+    </div>
+  </header>
+
+  <section id="themePanel" class="utility-panel hidden">
+    <div class="panel-label">THEME</div>
+    <div class="theme-row">
+      <button type="button" data-theme-choice="slate">Slate</button>
+      <button type="button" data-theme-choice="forest">Forest</button>
+      <button type="button" data-theme-choice="cream">Cream</button>
+      <button type="button" data-theme-choice="terminal">Terminal</button>
+      <button type="button" data-theme-choice="midnight">Midnight</button>
+    </div>
+  </section>
+
+  <section id="settingsPanel" class="utility-panel hidden">
+    <label class="panel-label" for="apiKey">TWELVE DATA KEY</label>
+    <div class="keyrow">
+      <input id="apiKey" type="password" placeholder="Paste API key">
+      <button id="saveKeyBtn" type="button">save</button>
+    </div>
+  </section>
+
+  <section class="watchlist-controls">
+    <div class="watchlist-topline">
+      <select id="watchlistSelect" aria-label="Choose watchlist"></select>
+      <button id="renameBtn" class="linkbtn" type="button">rename</button>
+      <button id="newListBtn" class="linkbtn" type="button">new</button>
+      <button id="deleteListBtn" class="linkbtn danger" type="button">delete</button>
+    </div>
+    <form id="renameForm" class="rename-row hidden">
+      <input id="renameInput" maxlength="24" placeholder="Watchlist name">
+      <button type="submit">save</button>
+      <button id="cancelRenameBtn" type="button">cancel</button>
+    </form>
+  </section>
+
+  <section class="search-section">
+    <label class="search-label" for="stockSearch">ADD STOCK</label>
+    <div class="searchbox">
+      <input id="stockSearch" autocomplete="off" spellcheck="false"
+             placeholder="Company or ticker…" aria-autocomplete="list"
+             aria-controls="searchResults">
+      <button id="clearSearchBtn" class="clear-search hidden" type="button" aria-label="Clear search">×</button>
+    </div>
+    <div id="searchHint" class="search-hint">Search by company name or symbol.</div>
+    <ul id="searchResults" class="search-results hidden" role="listbox"></ul>
+  </section>
+
+  <div class="bar">
+    <span id="listLabel">WATCHLIST</span>
+    <button id="refreshBtn" class="linkbtn" type="button">load prices</button>
+  </div>
+
+  <div class="watch-area">
+    <ul id="watchlist" aria-live="polite"></ul>
+    <div id="empty" class="empty hidden">
+      <img src="bearfish-mark.png" alt="" class="empty-mark">
+      <div>No stocks in this watchlist.</div>
+    </div>
+  </div>
+
+  <footer id="status">Nothing loads until you request it.</footer>
+</main>
+<script src="popup.js"></script>
+</body>
+</html>

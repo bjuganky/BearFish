@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BearFish Indicators</title><link rel="stylesheet" href="indicator.css"></head>
+<body data-theme="slate">
+<main class="indicator-shell">
+<header>
+  <div class="brandwrap"><img src="bearfish-mark.png" class="logo" alt=""><div><div class="brand">BEARFISH</div><div class="sub">INDICATOR SETUP · <span id="symbol">—</span></div></div></div>
+  <button id="closeBtn">done</button>
+</header>
+
+<section class="preset-section">
+  <div class="section-title">PRESET</div>
+  <div class="preset-line">
+    <select id="presetSelect"></select>
+    <button id="applyPresetBtn">apply</button>
+  </div>
+  <div class="save-line">
+    <input id="presetName" maxlength="24" placeholder="Name current setup">
+    <button id="savePresetBtn">save preset</button>
+    <button id="deletePresetBtn">delete</button>
+  </div>
+</section>
+
+<section class="rows">
+  <div class="indicator-row">
+    <label class="switch"><input id="smaEnabled" type="checkbox"><span>SMA</span></label>
+    <div class="field"><label>Period</label><input id="smaPeriod" type="number" min="2" max="500"></div>
+    <button class="help" data-help="sma" aria-label="Explain SMA">?</button>
+  </div>
+  <div id="help-sma" class="help-text hidden">Simple Moving Average: the average closing price over the chosen number of bars. Larger periods smooth more noise but react more slowly.</div>
+
+  <div class="indicator-row">
+    <label class="switch"><input id="emaEnabled" type="checkbox"><span>EMA</span></label>
+    <div class="field"><label>Period</label><input id="emaPeriod" type="number" min="2" max="500"></div>
+    <button class="help" data-help="ema" aria-label="Explain EMA">?</button>
+  </div>
+  <div id="help-ema" class="help-text hidden">Exponential Moving Average: similar to SMA, but recent prices receive more weight, so the line reacts faster to new movement.</div>
+
+  <div class="indicator-row">
+    <label class="switch"><input id="volumeEnabled" type="checkbox"><span>Volume</span></label>
+    <div class="description">Show traded volume beneath price.</div>
+    <button class="help" data-help="volume" aria-label="Explain volume">?</button>
+  </div>
+  <div id="help-volume" class="help-text hidden">Volume shows how much of the stock traded during each bar. High volume can make a price move more meaningful.</div>
+
+  <div class="indicator-row">
+    <label class="switch"><input id="rsiEnabled" type="checkbox"><span>RSI</span></label>
+    <div class="field"><label>Period</label><input id="rsiPeriod" type="number" min="2" max="100"></div>
+    <button class="help" data-help="rsi" aria-label="Explain RSI">?</button>
+  </div>
+  <div id="help-rsi" class="help-text hidden">Relative Strength Index measures recent gains versus losses on a 0–100 scale. It describes momentum; it does not by itself predict reversals.</div>
+
+  <div class="indicator-row macd-row">
+    <label class="switch"><input id="macdEnabled" type="checkbox"><span>MACD</span></label>
+    <div class="triple">
+      <div class="field"><label>Fast</label><input id="macdFast" type="number" min="2" max="200"></div>
+      <div class="field"><label>Slow</label><input id="macdSlow" type="number" min="3" max="300"></div>
+      <div class="field"><label>Signal</label><input id="macdSignal" type="number" min="2" max="200"></div>
+    </div>
+    <button class="help" data-help="macd" aria-label="Explain MACD">?</button>
+  </div>
+  <div id="help-macd" class="help-text hidden">MACD compares a fast EMA with a slower EMA, then smooths their difference with a signal line. It is commonly used to visualize trend and momentum changes.</div>
+</section>
+
+<footer><span id="status">Changes save automatically.</span></footer>
+</main>
+<script src="indicator.js"></script>
+</body></html>

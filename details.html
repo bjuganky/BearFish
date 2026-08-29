@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BearFish</title><link rel="stylesheet" href="details.css"></head>
+<body data-theme="slate"><main class="page">
+<header>
+  <div class="headbrand">
+    <img src="bearfish-logo.png" alt="" class="detail-logo">
+    <div><div class="brand">BEARFISH / MARKET VIEW</div><div class="titleline"><h1 id="symbol">—</h1><span id="meta">not loaded</span></div></div>
+  </div>
+  <button id="loadBtn" class="load">LOAD DATA</button>
+</header>
+<section class="numbers"><div><small>LAST</small><strong id="last">—</strong></div><div><small>RANGE CHANGE</small><strong id="change">—</strong></div><div><small>LAST VOLUME</small><strong id="volume">—</strong></div></section>
+<div class="controls">
+ <div class="ranges"><button data-range="1D">1D</button><button data-range="5D">5D</button><button data-range="1M" class="active">1M</button><button data-range="3M">3M</button><button data-range="1Y">1Y</button></div>
+ <div class="views"><span>VIEW</span><button data-view="candle" class="active">CANDLES</button><button data-view="line">LINE</button></div>
+</div>
+<section class="plot"><canvas id="chart"></canvas><div id="chartStatus">No market data loaded.</div></section>
+<section class="tools">
+ <div class="tool-title">OVERLAYS</div>
+ <label><input id="sma20" type="checkbox"> SMA 20</label><label><input id="sma50" type="checkbox"> SMA 50</label><label><input id="ema20" type="checkbox"> EMA 20</label><label><input id="volumeToggle" type="checkbox" checked> Volume</label>
+ <div class="tool-title second">PANELS</div>
+ <label><input id="rsiToggle" type="checkbox"> RSI 14</label><label><input id="macdToggle" type="checkbox"> MACD</label>
+</section>
+<section id="rsiPanel" class="indicator hidden"><div class="indicator-head"><span>RSI (14)</span><span id="rsiValue">—</span></div><canvas id="rsiChart"></canvas></section>
+<section id="macdPanel" class="indicator hidden"><div class="indicator-head"><span>MACD (12,26,9)</span><span id="macdValue">—</span></div><canvas id="macdChart"></canvas></section>
+</main><script src="details.js"></script></body></html>
