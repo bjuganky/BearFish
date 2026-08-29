@@ -9,26 +9,14 @@ function activeList(){return lists.find(x=>x.id===activeId)||lists[0]}
 function money(v){const n=Number(v);return Number.isFinite(n)?n.toLocaleString(undefined,{style:"currency",currency:"USD",maximumFractionDigits:2}):"—"}
 async function persist(){await browser.storage.local.set({watchlists:lists,activeWatchlistId:activeId,stockPrefs:prefs,theme})}
 
-const API_LIMIT=8,API_WINDOW_MS=60000;
 let apiQueue=Promise.resolve();
-function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
-async function reserveApiSlot(){
- while(true){
-  const d=await browser.storage.local.get(["apiRequestTimes"]);
-  const now=Date.now(),times=(Array.isArray(d.apiRequestTimes)?d.apiRequestTimes:[]).filter(t=>now-t<API_WINDOW_MS);
-  if(times.length<API_LIMIT){
-   times.push(now);await browser.storage.local.set({apiRequestTimes:times});return
-  }
-  const wait=Math.max(250,API_WINDOW_MS-(now-times[0])+100);
-  const secs=Math.ceil(wait/1000),st=$("status");if(st)st.textContent=`API limit reached — waiting ${secs}s…`;
-  await sleep(wait)
- }
-}
+const restLimiter=globalThis.BearFishRateLimit;
 function limitedJson(url){
  const task=apiQueue.then(async()=>{
-  await reserveApiSlot();
-  const r=await fetch(url),d=await r.json();
-  return{r,d}
+ return restLimiter.limitedJson(url,{
+  storage:browser.storage.local,
+  onWait:({waitMs})=>{const secs=Math.ceil(waitMs/1000),st=$("status");if(st)st.textContent=`API limit reached — waiting ${secs}s…`}
+ })
  });
  apiQueue=task.catch(()=>{});
  return task
