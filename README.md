@@ -1,5 +1,28 @@
 # BearFish — Firefox V0.8
 
+## Development & Testing
+
+### Setup
+Clone the repository and install development dependencies:
+
+```bash
+npm install
+```
+
+### Commands
+- **Launch in Firefox**: Launch BearFish in Firefox from the repository source:
+  ```bash
+  npm run firefox
+  ```
+- **Lint extension**: Run `web-ext lint` validation on extension source:
+  ```bash
+  npm run lint
+  ```
+- **Run tests**: Run extension manifest and file validation tests:
+  ```bash
+  npm test
+  ```
+
 ## Indicator editor
 Indicator configuration is no longer crowded into the inline stock panel.
 
