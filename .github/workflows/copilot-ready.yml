@@ -1,0 +1,25 @@
+name: Mark completed Copilot PRs ready
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, edited, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  mark-ready:
+    if: >-
+      github.event.pull_request.draft == true &&
+      github.event.pull_request.user.login == 'Copilot' &&
+      github.event.pull_request.changed_files > 0 &&
+      !startsWith(github.event.pull_request.title, '[WIP]')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Mark pull request ready for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr ready "$PR_URL"
