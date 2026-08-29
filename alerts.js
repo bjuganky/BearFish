@@ -19,6 +19,10 @@
   return type === "rsi_above" || type === "rsi_below";
  }
 
+ function isBlank(v) {
+  return v === "" || v === null || typeof v === "undefined" || (typeof v === "string" && v.trim() === "");
+ }
+
  /**
   * Validate raw user input for a new/edited alert.
   * input: {type, value, rsiPeriod}
@@ -29,6 +33,7 @@
   const type = String(input.type || "");
   if (TYPES.indexOf(type) === -1) return { ok: false, error: "Choose a valid alert type." };
 
+  if (isBlank(input.value)) return { ok: false, error: "Enter a numeric threshold." };
   const value = Number(input.value);
   if (!Number.isFinite(value)) return { ok: false, error: "Enter a numeric threshold." };
 
@@ -40,6 +45,7 @@
 
   let rsiPeriod = DEFAULT_RSI_PERIOD;
   if (isRsiType(type)) {
+   if (isBlank(input.rsiPeriod)) return { ok: false, error: "RSI period must be a whole number between 2 and 100." };
    rsiPeriod = Math.round(Number(input.rsiPeriod));
    if (!Number.isFinite(rsiPeriod) || rsiPeriod < 2 || rsiPeriod > 100) {
     return { ok: false, error: "RSI period must be a whole number between 2 and 100." };

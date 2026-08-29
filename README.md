@@ -39,10 +39,15 @@ If no valid tick arrives within 8 seconds:
 3. If that is unavailable too, it shows a clear retry/change-interval message.
 
 ## API pacing
-All REST calls now pass through one persisted limiter:
-- maximum 8 calls in any rolling 60-second window
-- includes stock search, quote requests, historical chart requests, and fallbacks
-- request timestamps persist in extension storage so closing/reopening the popup does not reset the limit
+All REST calls now pass through one centralized, serialized limiter (`rateLimit.js` +
+the reservation service registered in `background.js`):
+- maximum 8 calls in any rolling 60-second window, shared by every context
+- popup and details pages reserve a slot by messaging the background script
+  (`bearfish:reserve-rest-slot`), which serializes every reservation — including
+  its own alert-monitoring requests — through one queue, so contexts can never
+  race each other over the same budget
+- request timestamps persist in extension storage so closing/reopening the popup
+  does not reset the limit
 - requests wait automatically when the limit has been reached
 
 WebSocket streaming is separate from this REST-call limiter.
@@ -57,7 +62,8 @@ Supported trigger types:
 - RSI crosses below a threshold
 
 Alerts can be created, listed, enabled/disabled, and deleted. Invalid or missing
-thresholds are rejected with a short inline message before saving.
+thresholds (including blank/whitespace-only input) are rejected with a short inline
+message before saving.
 
 Alert definitions and their armed/notified state are stored in
 `browser.storage.local` (`stockAlerts`), so they persist across popup closes and
@@ -73,8 +79,10 @@ minutes) only when at least one alert is enabled and an API key is configured:
   request each.
 - RSI is always computed locally from the fetched closes; no Twelve Data
   technical-indicator endpoint is called.
-- All background REST requests reserve a slot from the same persisted,
-  rolling 8-per-60-second limiter used by the popup/details views, so alert
+- All background REST requests reserve a slot from the same centralized,
+  persisted, rolling 8-per-60-second limiter used by the popup/details views
+  (calling the reservation service directly in-process, rather than through
+  the runtime-message path used by the popup/details pages), so alert
   monitoring can never push the extension over its shared request budget.
 - A notification fires only on an unmet → met transition. A condition that
   stays true does not repeat; it re-arms once it becomes false again. The very
@@ -83,6 +91,18 @@ minutes) only when at least one alert is enabled and an API key is configured:
 - While markets are closed or data is temporarily stale/unavailable, the last
   known value is reused/held and evaluated normally; failed requests for a
   symbol are logged and skipped for that cycle rather than throwing.
+- Each alert's evaluation state is re-read and merged against the latest
+  `stockAlerts` storage immediately before every write, so an alert added,
+  edited, or deleted in the indicator UI while a scan is in progress is never
+  silently overwritten or resurrected.
+- Only one scan runs at a time: if an alarm fires again before the previous
+  scan finished (for example because many symbols queued behind the shared
+  rate limiter), the overlapping invocation is coalesced into a no-op instead
+  of starting a second concurrent scan.
+- A crossing is persisted to `browser.storage.local` before its notification
+  is created. If the write fails, the notification is skipped entirely (rather
+  than firing first) so a storage error or restart cannot cause a duplicate
+  notification for the same crossing.
 - Clicking a notification opens/focuses the corresponding stock's details view.
 
 ## Themes / spacing

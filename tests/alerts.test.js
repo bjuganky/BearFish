@@ -132,4 +132,15 @@ test("sanitizeStore tolerates completely missing/legacy storage", () => {
  assert.deepStrictEqual(A.sanitizeStore("legacy-string"), {});
 });
 
+test("rejects blank/whitespace threshold before numeric conversion", () => {
+ const blankValue = A.validateAlertInput({ type: "rsi_above", value: "", rsiPeriod: 14 });
+ assert.strictEqual(blankValue.ok, false);
+ const whitespaceValue = A.validateAlertInput({ type: "rsi_above", value: "   ", rsiPeriod: 14 });
+ assert.strictEqual(whitespaceValue.ok, false);
+ const blankPeriod = A.validateAlertInput({ type: "rsi_above", value: 70, rsiPeriod: "" });
+ assert.strictEqual(blankPeriod.ok, false);
+ const whitespacePeriod = A.validateAlertInput({ type: "rsi_above", value: 70, rsiPeriod: "  " });
+ assert.strictEqual(whitespacePeriod.ok, false);
+});
+
 console.log(`\n${passed} test(s) passed`);
