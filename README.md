@@ -91,10 +91,24 @@ minutes) only when at least one alert is enabled and an API key is configured:
 - While markets are closed or data is temporarily stale/unavailable, the last
   known value is reused/held and evaluated normally; failed requests for a
   symbol are logged and skipped for that cycle rather than throwing.
-- Each alert's evaluation state is re-read and merged against the latest
-  `stockAlerts` storage immediately before every write, so an alert added,
-  edited, or deleted in the indicator UI while a scan is in progress is never
-  silently overwritten or resurrected.
+- Each alert's definition and edits (add/delete/enable-disable, and future
+  threshold edits) are owned exclusively by one serialized, in-memory store
+  inside `background.js`. The indicator UI never reads or writes
+  `stockAlerts` in `browser.storage.local` directly — it sends runtime
+  messages (`bearfish:alerts:list/add/remove/setEnabled`) and always
+  re-renders from the response. Because there is only ever one in-process
+  owner serializing every mutation (UI edits and the monitor's evaluation
+  patches alike) behind a single queue, there is no separate "read the whole
+  blob, then write the whole blob" step for two contexts to race on: a
+  concurrent add/delete/toggle from the UI and a patch from the monitor can
+  never clobber each other, and a deleted alert is never resurrected.
+- Immediately before evaluating each alert, the monitor re-reads that
+  alert's *current* definition from the store (not a pre-fetch snapshot), so
+  a threshold or type edited while a network request for that symbol was in
+  flight is honored rather than acted on with stale data; if an edit changes
+  what data is needed (e.g. a different RSI period) that wasn't part of the
+  current cycle's fetch plan, that alert is simply skipped until the next
+  scan instead of being evaluated against mismatched data.
 - Only one scan runs at a time: if an alarm fires again before the previous
   scan finished (for example because many symbols queued behind the shared
   rate limiter), the overlapping invocation is coalesced into a no-op instead

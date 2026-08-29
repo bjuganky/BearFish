@@ -1,13 +1,17 @@
 /* Focused tests for background.js: shared reservation budget across
-   concurrent contexts, per-alert reconciliation against concurrent edits,
-   single-flight scan coalescing, and persist-before-notify ordering.
+   concurrent contexts, the single in-memory AlertStore owner's
+   serialization (no lost updates regardless of call/interleaving order,
+   because there is no separate read-then-write step for two contexts to
+   race on), single-flight scan coalescing, persist-before-notify
+   ordering, and mid-scan edit correctness.
    Run with: node --test tests/background.test.js (or via node tests/background.test.js) */
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
  attachRuntimeListener,
+ createAlertStore,
  createAlertMonitor,
- reconcileAndPersist
+ checkSymbol
 } = require("../background.js");
 const rateLimit = require("../rateLimit.js");
 const alertsLib = require("../alerts.js");
@@ -19,6 +23,34 @@ class MockStorage {
   return { ...this.data };
  }
  async set(obj) { Object.assign(this.data, obj); }
+}
+
+/* A storage whose `set` resolves only after `releaseNextSet()` is called,
+   letting a test deterministically pause execution right in the middle of
+   a store mutation (after the in-memory cache has been updated, before
+   the write actually lands) so a second, concurrent mutation can be
+   issued into that exact window. */
+class GatedStorage extends MockStorage {
+ constructor(seed = {}) {
+  super(seed);
+  this._gates = [];
+ }
+ async set(obj) {
+  await new Promise((resolve) => this._gates.push(resolve));
+  return super.set(obj);
+ }
+ releaseNextSet() {
+  const gate = this._gates.shift();
+  if (gate) gate();
+ }
+ /* Waits (polling on the microtask/timer queue) until a set() call has
+    actually been issued and is blocked on a gate, then releases it. This
+    avoids assuming exact tick timing for when a queued operation's
+    storage.set() is reached. */
+ async releaseWhenGated() {
+  while (this._gates.length === 0) await new Promise((r) => setTimeout(r, 0));
+  this.releaseNextSet();
+ }
 }
 
 test("alert monitor and UI context share one serialized reservation budget concurrently", async () => {
@@ -48,42 +80,153 @@ test("alert monitor and UI context share one serialized reservation budget concu
  assert.ok(sleepCalls[0] >= 220, "must wait roughly a full window before the 9th slot opens");
 });
 
-test("reconcileAndPersist preserves concurrent deletion and never resurrects a deleted alert", async () => {
- const alertA = alertsLib.validateAlertInput({ type: "price_above", value: 100 }).alert;
- const alertB = alertsLib.validateAlertInput({ type: "price_below", value: 50 }).alert;
- const storage = new MockStorage({ stockAlerts: { AAPL: [alertA, alertB] } });
+test("AlertStore serializes a UI mutation issued while the monitor's write is still in flight (no lost update)", async () => {
+ const storage = new GatedStorage();
+ const store = createAlertStore(storage, alertsLib);
 
- // Simulate indicator.js deleting alertB while the scan was doing network I/O.
- storage.data.stockAlerts = { AAPL: [alertA] };
+ const setup = store.addAlert("AAPL", { type: "price_above", value: 100 });
+ await storage.releaseWhenGated();
+ const added = await setup;
+ assert.ok(added.ok);
+ const alertId = added.alert.id;
 
- const patched = await reconcileAndPersist(storage, alertsLib, "AAPL", {
-  [alertA.id]: { lastMet: true, lastValue: 105, lastCheckedAt: 123 }
- });
- assert.ok(patched);
+ // "Monitor" begins persisting an evaluation patch; its storage.set() is
+ // gated open, so it is paused right after mutating the in-memory cache
+ // but before the write actually completes.
+ const monitorPatch = store.patchEvaluation("AAPL", alertId, { lastMet: true, lastValue: 105, lastCheckedAt: 1 });
+
+ // While that write is still pending, the "UI" issues a second, unrelated
+ // mutation (add another alert for the same symbol). Because both
+ // operations are funneled through the same store's single queue, this
+ // call cannot start until the monitor's mutation (including its
+ // storage.set) has fully resolved -- there is no window where a "get"
+ // from this call could observe stale data and overwrite the monitor's
+ // in-flight change.
+ const uiAdd = store.addAlert("AAPL", { type: "price_below", value: 50 });
+
+ await storage.releaseWhenGated(); // let the monitor's write proceed
+ await storage.releaseWhenGated(); // let the UI's write proceed (queued behind it)
+
+ const [patched, added2] = await Promise.all([monitorPatch, uiAdd]);
  assert.equal(patched.lastMet, true);
- assert.equal(storage.data.stockAlerts.AAPL.length, 1);
- assert.equal(storage.data.stockAlerts.AAPL[0].id, alertA.id);
+ assert.ok(added2.ok);
 
- const patchedDeleted = await reconcileAndPersist(storage, alertsLib, "AAPL", {
-  [alertB.id]: { lastMet: true, lastValue: 40, lastCheckedAt: 456 }
- });
- assert.equal(patchedDeleted, null, "a patch for a since-deleted alert id is a no-op");
- assert.equal(storage.data.stockAlerts.AAPL.length, 1);
+ const finalList = await store.listAlerts("AAPL");
+ assert.equal(finalList.length, 2, "both the monitor's patch and the UI's add must survive");
+ assert.equal(finalList.find((a) => a.id === alertId).lastMet, true);
+ assert.equal(finalList.filter((a) => a.type === "price_below").length, 1);
 });
 
-test("reconcileAndPersist preserves a concurrent enable/disable toggle made by the UI", async () => {
- const alert = alertsLib.validateAlertInput({ type: "price_above", value: 100 }).alert;
- const storage = new MockStorage({ stockAlerts: { AAPL: [alert] } });
+test("AlertStore serializes a monitor patch issued while a UI write is still in flight (reverse ordering, no lost update)", async () => {
+ const storage = new GatedStorage();
+ const store = createAlertStore(storage, alertsLib);
 
- // Simulate the user disabling the alert in indicator.js mid-scan.
- storage.data.stockAlerts = { AAPL: [{ ...alert, enabled: false }] };
+ const setup = store.addAlert("MSFT", { type: "price_above", value: 100 });
+ await storage.releaseWhenGated();
+ const added = await setup;
+ const alertId = added.alert.id;
 
- await reconcileAndPersist(storage, alertsLib, "AAPL", {
-  [alert.id]: { lastMet: true, lastValue: 105, lastCheckedAt: 123 }
+ // This time the "UI" (an enable/disable toggle) starts first and its
+ // write is paused mid-flight.
+ const uiToggle = store.setEnabled("MSFT", alertId, false);
+
+ // The "monitor" tries to patch evaluation state for the same alert while
+ // that UI write is still pending; it must queue behind it rather than
+ // racing a concurrent get/set.
+ const monitorPatch = store.patchEvaluation("MSFT", alertId, { lastMet: true, lastValue: 105, lastCheckedAt: 2 });
+
+ await storage.releaseWhenGated(); // UI toggle's write proceeds first
+ await storage.releaseWhenGated(); // monitor patch's write proceeds, queued behind it
+
+ await Promise.all([uiToggle, monitorPatch]);
+
+ const finalList = await store.listAlerts("MSFT");
+ assert.equal(finalList.length, 1);
+ assert.equal(finalList[0].enabled, false, "the concurrent disable is not clobbered");
+ assert.equal(finalList[0].lastMet, true, "the evaluation patch still lands");
+});
+
+test("AlertStore never resurrects a deleted alert even when a patch for it is queued right behind the delete", async () => {
+ const storage = new MockStorage();
+ const store = createAlertStore(storage, alertsLib);
+ const a = (await store.addAlert("AAPL", { type: "price_above", value: 100 })).alert;
+ const b = (await store.addAlert("AAPL", { type: "price_below", value: 50 })).alert;
+
+ const del = store.removeAlert("AAPL", b.id);
+ const patch = store.patchEvaluation("AAPL", b.id, { lastMet: true, lastValue: 40, lastCheckedAt: 1 });
+ const [, patched] = await Promise.all([del, patch]);
+
+ assert.equal(patched, null, "a patch for a since-deleted alert id is a no-op");
+ const finalList = await store.listAlerts("AAPL");
+ assert.equal(finalList.length, 1);
+ assert.equal(finalList[0].id, a.id);
+});
+
+test("a persistence failure rolls back the in-memory cache instead of leaving a phantom unsaved mutation", async () => {
+ const storage = new MockStorage();
+ const store = createAlertStore(storage, alertsLib);
+ const a = (await store.addAlert("AAPL", { type: "price_above", value: 100 })).alert;
+
+ storage.set = async () => { throw new Error("storage unavailable"); };
+ await assert.rejects(() => store.patchEvaluation("AAPL", a.id, { lastMet: true, lastValue: 105, lastCheckedAt: 1 }));
+
+ // The cache must reflect the last durable state, not the failed write,
+ // so a later successful operation can't be fooled into thinking this
+ // transition was already saved.
+ const fresh = await store.getAlert("AAPL", a.id);
+ assert.equal(fresh.lastMet, null, "rolled back to the pre-failure state");
+});
+
+test("an alert edited mid-scan is evaluated against its new definition, never a stale pre-fetch snapshot", async () => {
+ const storage = new MockStorage();
+ const store = createAlertStore(storage, alertsLib);
+ const added = await store.addAlert("AAPL", { type: "price_above", value: 100 });
+ const alertId = added.alert.id;
+
+ let fetchCalls = 0;
+ const fetchImpl = async () => {
+  fetchCalls++;
+  // While the network request is "in flight", the user raises the
+  // threshold well above the value about to be returned.
+  await store.updateAlert("AAPL", alertId, { type: "price_above", value: 1000 });
+  return { ok: true, status: 200, json: async () => ({ close: "105" }) };
+ };
+ const notifications = [];
+ await checkSymbol({
+  store, alertsLib, reserve: async () => {}, fetchImpl, apiKey: "key", symbol: "AAPL",
+  notify: async (...args) => notifications.push(args)
  });
- const stored = storage.data.stockAlerts.AAPL[0];
- assert.equal(stored.enabled, false, "concurrent disable is not clobbered by the scan's write");
- assert.equal(stored.lastMet, true, "evaluation fields are still merged in");
+
+ assert.equal(fetchCalls, 1);
+ assert.equal(notifications.length, 0, "105 no longer crosses the edited threshold of 1000, so nothing fires");
+ const final = await store.getAlert("AAPL", alertId);
+ assert.equal(final.value, 1000);
+ assert.equal(final.lastMet, false, "evaluated (and armed) against the new definition, not the stale one");
+});
+
+test("an alert whose type is edited mid-scan to data not fetched this cycle is skipped, not evaluated against mismatched data", async () => {
+ const storage = new MockStorage();
+ const store = createAlertStore(storage, alertsLib);
+ const added = await store.addAlert("AAPL", { type: "price_above", value: 100 });
+ const alertId = added.alert.id;
+
+ const fetchImpl = async () => {
+  // Concurrently, the user changes this alert into an RSI alert. This
+  // cycle only fetched a quote (no RSI series), so it must not be
+  // evaluated against a mismatched/absent RSI value.
+  await store.updateAlert("AAPL", alertId, { type: "rsi_above", value: 70, rsiPeriod: 14 });
+  return { ok: true, status: 200, json: async () => ({ close: "105" }) };
+ };
+ const notifications = [];
+ await checkSymbol({
+  store, alertsLib, reserve: async () => {}, fetchImpl, apiKey: "key", symbol: "AAPL",
+  notify: async (...args) => notifications.push(args)
+ });
+
+ assert.equal(notifications.length, 0);
+ const final = await store.getAlert("AAPL", alertId);
+ assert.equal(final.type, "rsi_above");
+ assert.equal(final.lastCheckedAt, null, "skipped this cycle rather than evaluated against mismatched data");
 });
 
 test("overlapping alarm invocations are coalesced into a single scan", async () => {
@@ -130,7 +273,6 @@ test("alert state is persisted before the notification is emitted", async () => 
 test("a persistence failure suppresses the notification instead of firing before the write", async () => {
  const alert = { ...alertsLib.validateAlertInput({ type: "price_above", value: 100 }).alert, lastMet: false };
  const storage = new MockStorage({ apiKey: "key", stockAlerts: { AAPL: [alert] } });
- storage.set = async () => { throw new Error("storage unavailable"); };
  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ close: "105" }) });
  let notified = false;
 
@@ -138,6 +280,7 @@ test("a persistence failure suppresses the notification instead of firing before
   storage, alertsLib, reserve: async () => {}, fetchImpl,
   notify: async () => { notified = true; }
  });
+ storage.set = async () => { throw new Error("storage unavailable"); };
  await monitor.runCheck(); // must not throw out of the alarm handler
 
  assert.equal(notified, false, "no notification without a durable state write");

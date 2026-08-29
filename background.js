@@ -2,12 +2,20 @@
    1) Serializes Twelve Data REST reservations for every context (popup,
       details, and this script itself) behind one queued service, exposed to
       popup/details via a runtime message (see rateLimit.js).
-   2) Runs a periodic, single-flight alert monitor that evaluates persisted
+   2) Owns the single in-memory, in-process `stockAlerts` store: every
+      mutation (UI add/remove/enable-disable, and the monitor's evaluation
+      patches) is serialized through one promise queue operating on one
+      shared cache, so there is never a separate "read the whole blob, then
+      write the whole blob" step for two contexts to race on. The UI talks
+      to this owner exclusively via runtime messages (bearfish:alerts:*);
+      it never reads or writes browser.storage.local for stockAlerts itself.
+   3) Runs a periodic, single-flight alert monitor that evaluates persisted
       stock alerts and fires native Firefox notifications on unmet -> met
-      transitions, reconciling its evaluation state against the latest
-      storage before every write so concurrent edits/deletes from the
-      indicator UI are never clobbered, and persists that state before
-      emitting a notification. */
+      transitions. Immediately before evaluating each alert it re-fetches
+      that alert's *current* definition from the store owner, so a
+      threshold/type edited mid-scan is honored rather than acted on with a
+      stale snapshot, and persists the new evaluation state (atomically,
+      via the same owner) before emitting a notification. */
 (function (global) {
  "use strict";
 
@@ -43,6 +51,193 @@
   return service;
  }
 
+ /* ---------------- Alert store (single in-memory owner) ---------------- */
+
+ const ALERT_MESSAGE_TYPES = {
+  list: "bearfish:alerts:list",
+  add: "bearfish:alerts:add",
+  update: "bearfish:alerts:update",
+  remove: "bearfish:alerts:remove",
+  setEnabled: "bearfish:alerts:setEnabled"
+ };
+
+ /**
+  * The only code in the extension allowed to read/write the `stockAlerts`
+  * storage key. Loads it once, keeps an in-process cache as the single
+  * source of truth, and serializes every operation (list/add/update/
+  * remove/setEnabled from the UI, and patchEvaluation/getAlert from the
+  * monitor) through one queue. Because there is no separate "get the whole
+  * blob" step exposed to callers, two concurrent mutations can never
+  * interleave a read from one with a write from the other: each operation
+  * runs to completion (including its `storage.set`) before the next one
+  * starts, and every operation mutates the same up-to-date in-memory cache.
+  */
+ function createAlertStore(storage, alertsLib) {
+  let cache = null;
+  let queue = Promise.resolve();
+
+  async function ensureLoaded() {
+   if (cache) return;
+   const raw = await storage.get(["stockAlerts"]);
+   cache = alertsLib.sanitizeStore(raw.stockAlerts);
+  }
+
+  function enqueue(fn) {
+   const task = queue.then(async () => { await ensureLoaded(); return fn(); });
+   queue = task.catch(() => {});
+   return task;
+  }
+
+  function cloneList(symbol) { return (cache[symbol] || []).map((a) => ({ ...a })); }
+
+  /* Applies `mutate(cache)` (which must assign/delete cache[symbol] itself)
+     and persists the whole cache. If persistence fails, the mutation is
+     rolled back so the in-memory cache never diverges from what is
+     actually durable on disk -- a failed write can never leave a "phantom"
+     state that a later operation (e.g. the next scan) would mistake for
+     having been saved. */
+  async function mutateAndPersist(symbol, mutate) {
+   const prevHad = Object.prototype.hasOwnProperty.call(cache, symbol);
+   const prevList = cache[symbol];
+   mutate();
+   try {
+    await storage.set({ stockAlerts: cache });
+   } catch (e) {
+    if (prevHad) cache[symbol] = prevList; else delete cache[symbol];
+    throw e;
+   }
+  }
+
+  return {
+   listAlerts(symbol) {
+    return enqueue(() => cloneList(symbol));
+   },
+
+   addAlert(symbol, input) {
+    return enqueue(async () => {
+     const check = alertsLib.validateAlertInput(input);
+     if (!check.ok) return { ok: false, error: check.error };
+     await mutateAndPersist(symbol, () => {
+      const list = cache[symbol] ? cache[symbol].slice() : [];
+      list.push(check.alert);
+      cache[symbol] = list;
+     });
+     return { ok: true, alert: { ...check.alert }, list: cloneList(symbol) };
+    });
+   },
+
+   /* Not currently wired to a UI control (the alert editor stays add/
+      enable-disable/delete only, per the compact-UI requirement), but
+      exposed and tested to prove that when an alert's definition does
+      change mid-scan, the store's other operations (including the
+      monitor's getAlert) always observe the new definition, never a
+      stale one -- there is no read path that could still see the old
+      value/type/rsiPeriod once this resolves. */
+   updateAlert(symbol, alertId, input) {
+    return enqueue(async () => {
+     const list = cache[symbol] || [];
+     const idx = list.findIndex((a) => a.id === alertId);
+     if (idx === -1) return { ok: false, error: "Alert not found." };
+     const check = alertsLib.validateAlertInput({ ...input, id: alertId });
+     if (!check.ok) return { ok: false, error: check.error };
+     const prev = list[idx];
+     // Changing the definition re-arms the alert (like a freshly created one):
+     // the next observation only arms it, it never fires from stale state.
+     const updated = { ...prev, type: check.alert.type, value: check.alert.value, rsiPeriod: check.alert.rsiPeriod, lastMet: null, lastValue: null, lastCheckedAt: null };
+     await mutateAndPersist(symbol, () => {
+      const nextList = list.slice();
+      nextList[idx] = updated;
+      cache[symbol] = nextList;
+     });
+     return { ok: true, alert: { ...updated }, list: cloneList(symbol) };
+    });
+   },
+
+   removeAlert(symbol, alertId) {
+    return enqueue(async () => {
+     await mutateAndPersist(symbol, () => {
+      const list = (cache[symbol] || []).filter((a) => a.id !== alertId);
+      if (list.length) cache[symbol] = list; else delete cache[symbol];
+     });
+     return { ok: true, list: cloneList(symbol) };
+    });
+   },
+
+   setEnabled(symbol, alertId, enabled) {
+    return enqueue(async () => {
+     const list = cache[symbol] || [];
+     const idx = list.findIndex((a) => a.id === alertId);
+     if (idx === -1) return { ok: false, error: "Alert not found." };
+     await mutateAndPersist(symbol, () => {
+      const nextList = list.slice();
+      nextList[idx] = { ...list[idx], enabled: !!enabled };
+      cache[symbol] = nextList;
+     });
+     return { ok: true, list: cloneList(symbol) };
+    });
+   },
+
+   /* Monitor-only: which symbols currently have at least one enabled alert.
+      Used only to decide *what* to check; each alert's definition is always
+      re-read fresh via getAlert() immediately before it is evaluated. */
+   enabledSymbols() {
+    return enqueue(() => Object.keys(cache).filter((sym) => (cache[sym] || []).some((a) => a.enabled)));
+   },
+
+   enabledAlerts(symbol) {
+    return enqueue(() => (cache[symbol] || []).filter((a) => a.enabled).map((a) => ({ ...a })));
+   },
+
+   /* Monitor-only: fetch the current definition + evaluation state for one
+      alert id, or null if it no longer exists (deleted concurrently). */
+   getAlert(symbol, alertId) {
+    return enqueue(() => {
+     const found = (cache[symbol] || []).find((a) => a.id === alertId);
+     return found ? { ...found } : null;
+    });
+   },
+
+   /* Monitor-only: apply an evaluation patch iff the alert still exists;
+      returns the merged alert, or null if it was deleted/edited away
+      concurrently (never resurrects a deleted alert). */
+   patchEvaluation(symbol, alertId, patch) {
+    return enqueue(async () => {
+     const list = cache[symbol];
+     if (!list) return null;
+     const idx = list.findIndex((a) => a.id === alertId);
+     if (idx === -1) return null;
+     const updated = { ...list[idx], ...patch };
+     await mutateAndPersist(symbol, () => {
+      const nextList = list.slice();
+      nextList[idx] = updated;
+      cache[symbol] = nextList;
+     });
+     return { ...updated };
+    });
+   }
+  };
+ }
+
+ function attachAlertStoreListener(runtime, store) {
+  runtime.onMessage.addListener((msg) => {
+   if (!msg || typeof msg.type !== "string") return;
+   switch (msg.type) {
+    case ALERT_MESSAGE_TYPES.list:
+     return store.listAlerts(msg.symbol).then((list) => ({ ok: true, list }));
+    case ALERT_MESSAGE_TYPES.add:
+     return store.addAlert(msg.symbol, msg.input);
+    case ALERT_MESSAGE_TYPES.update:
+     return store.updateAlert(msg.symbol, msg.id, msg.input);
+    case ALERT_MESSAGE_TYPES.remove:
+     return store.removeAlert(msg.symbol, msg.id);
+    case ALERT_MESSAGE_TYPES.setEnabled:
+     return store.setEnabled(msg.symbol, msg.id, msg.enabled);
+    default:
+     return undefined;
+   }
+  });
+ }
+
  /* ---------------- Alert monitor (pure/testable core) ---------------- */
 
  const ALARM_NAME = "bearfish-alert-scan";
@@ -61,44 +256,25 @@
  }
 
  /**
-  * Re-reads the latest persisted alert store and applies only the supplied
-  * per-alert evaluation patches (keyed by alert id), for one symbol. Alerts
-  * that were deleted/edited concurrently by the UI are left untouched aside
-  * from the patched evaluation fields, and a missing alert id is skipped
-  * entirely rather than resurrected.
-  */
- async function reconcileAndPersist(storage, alertsLib, symbol, patchesById) {
-  const raw = await storage.get(["stockAlerts"]);
-  const store = alertsLib.sanitizeStore(raw.stockAlerts);
-  const list = store[symbol];
-  if (!list || !list.length) return null;
-  let changed = false, patchedAlert = null;
-  const nextList = list.map((a) => {
-   const patch = patchesById[a.id];
-   if (!patch) return a;
-   changed = true;
-   patchedAlert = Object.assign({}, a, patch);
-   return patchedAlert;
-  });
-  if (!changed) return null;
-  store[symbol] = nextList;
-  await storage.set({ stockAlerts: store });
-  return patchedAlert;
- }
-
- /**
   * Evaluates every enabled alert for one symbol against freshly-fetched
-  * price/RSI values, persisting each alert's new evaluation state (merged
-  * against the latest store) before firing its notification, so a crash or
-  * concurrent edit cannot cause a duplicate notification after restart.
+  * price/RSI values. The set of alerts/periods to fetch is only *planned*
+  * from a snapshot; every alert is re-read fresh from the store (via
+  * store.getAlert) immediately before its crossing is computed, so an
+  * edit/delete/disable that happens while the network request is in
+  * flight is always honored -- never a notification computed from a
+  * stale pre-fetch definition. If a concurrent edit changes what data is
+  * needed (e.g. a different RSI period) that wasn't part of this cycle's
+  * fetch plan, that alert is simply skipped for this cycle and picked up
+  * on the next scan, rather than evaluated against mismatched data.
   */
- async function checkSymbol({ storage, alertsLib, reserve, fetchImpl, apiKey, symbol, alerts, notify, log }) {
-  const enabled = alerts.filter((a) => a.enabled);
-  const needsPrice = enabled.some((a) => a.type === "price_above" || a.type === "price_below");
-  const rsiAlerts = enabled.filter((a) => alertsLib.isRsiType(a.type));
+ async function checkSymbol({ store, alertsLib, reserve, fetchImpl, apiKey, symbol, notify, log }) {
+  const planned = await store.enabledAlerts(symbol);
+  if (!planned.length) return;
+  const needsPrice = planned.some((a) => a.type === "price_above" || a.type === "price_below");
+  const periods = [...new Set(planned.filter((a) => alertsLib.isRsiType(a.type)).map((a) => a.rsiPeriod))];
+
   let priceValue = null;
   const rsiByPeriod = {};
-
   try {
    if (needsPrice) {
     await reserve();
@@ -106,7 +282,6 @@
     if (!r.ok || q.status === "error" || q.code) throw new Error(q.message || "Quote request failed");
     priceValue = Number(q.close ?? q.price ?? q.last);
    }
-   const periods = [...new Set(rsiAlerts.map((a) => a.rsiPeriod))];
    for (const period of periods) {
     await reserve();
     const outputsize = Math.max(period + 5, 30);
@@ -120,46 +295,46 @@
    return;
   }
 
-  for (const alert of enabled) {
-   const currentValue = alertsLib.isRsiType(alert.type) ? rsiByPeriod[alert.rsiPeriod] : priceValue;
-   if (!Number.isFinite(currentValue)) continue;
-   const { alert: updated, notify: shouldNotify } = alertsLib.processAlertUpdate(alert, currentValue);
+  for (const plannedAlert of planned) {
+   const latest = await store.getAlert(symbol, plannedAlert.id);
+   if (!latest || !latest.enabled) continue; // deleted/disabled concurrently
+
+   const currentValue = alertsLib.isRsiType(latest.type) ? rsiByPeriod[latest.rsiPeriod] : priceValue;
+   if (!Number.isFinite(currentValue)) continue; // definition changed to data we didn't fetch this cycle; retry next scan
+
+   const { alert: updated, notify: shouldNotify } = alertsLib.processAlertUpdate(latest, currentValue);
    const patch = { lastMet: updated.lastMet, lastValue: updated.lastValue, lastCheckedAt: updated.lastCheckedAt };
    let persisted;
    try {
-    persisted = await reconcileAndPersist(storage, alertsLib, symbol, { [alert.id]: patch });
+    persisted = await store.patchEvaluation(symbol, latest.id, patch);
    } catch (e) {
     // Explicit failure policy: never notify on a transition that failed to persist.
-    // The prior (unmet) state stays on disk, so the next scan re-evaluates and can
-    // still notify once persistence succeeds and a genuine crossing is (re)detected.
+    // The prior (unmet) state stays in the store, so the next scan re-evaluates and
+    // can still notify once persistence succeeds and a genuine crossing is (re)detected.
     if (log) log("BearFish: unable to persist alert state for " + symbol, e && e.message);
     continue;
    }
-   if (!persisted) continue; // alert was deleted/edited away concurrently; nothing to notify about
+   if (!persisted) continue; // alert was deleted concurrently; nothing to notify about
    if (shouldNotify) await notify(symbol, persisted, currentValue);
   }
  }
 
  function createAlertMonitor({ storage, alertsLib, reserve, fetchImpl, notify, log = console.error.bind(console) }) {
+  const store = createAlertStore(storage, alertsLib);
   let inFlight = null;
   async function doRun() {
-   let data;
+   let apiKey;
    try {
-    data = await storage.get(["apiKey", "stockAlerts"]);
+    apiKey = (await storage.get(["apiKey"])).apiKey || "";
    } catch (e) {
     log("BearFish: unable to read storage", e);
     return;
    }
-   const apiKey = data.apiKey || "";
-   const store = alertsLib.sanitizeStore(data.stockAlerts);
-   const symbols = Object.keys(store).filter((sym) => store[sym].some((a) => a.enabled));
-   if (!apiKey || !symbols.length) return;
+   if (!apiKey) return;
+   const symbols = await store.enabledSymbols();
+   if (!symbols.length) return;
    for (const symbol of symbols) {
-    // Re-read per symbol so a long-running earlier iteration can't act on stale data.
-    const fresh = alertsLib.sanitizeStore((await storage.get(["stockAlerts"])).stockAlerts);
-    const alerts = fresh[symbol];
-    if (!alerts || !alerts.some((a) => a.enabled)) continue;
-    await checkSymbol({ storage, alertsLib, reserve, fetchImpl, apiKey, symbol, alerts, notify, log });
+    await checkSymbol({ store, alertsLib, reserve, fetchImpl, apiKey, symbol, notify, log });
    }
   }
   function runCheck() {
@@ -167,7 +342,7 @@
    inFlight = doRun().finally(() => { inFlight = null; });
    return inFlight;
   }
-  return { runCheck, isScanInFlight: () => !!inFlight };
+  return { runCheck, isScanInFlight: () => !!inFlight, store };
  }
 
  /* ---------------- Browser wiring ---------------- */
@@ -197,6 +372,8 @@
     }
    });
 
+   attachAlertStoreListener(browser.runtime, monitor.store);
+
    function ensureAlarm() { browser.alarms.create(ALARM_NAME, { periodInMinutes: CHECK_PERIOD_MINUTES }); }
    browser.runtime.onInstalled.addListener(() => { ensureAlarm(); monitor.runCheck(); });
    browser.runtime.onStartup.addListener(() => { ensureAlarm(); monitor.runCheck(); });
@@ -219,7 +396,11 @@
  }
 
  if (typeof module !== "undefined" && module.exports) {
-  module.exports = { createReservationService, attachRuntimeListener, RESERVE_MESSAGE_TYPE, createAlertMonitor, checkSymbol, reconcileAndPersist };
+  module.exports = {
+   createReservationService, attachRuntimeListener, RESERVE_MESSAGE_TYPE,
+   createAlertStore, attachAlertStoreListener, ALERT_MESSAGE_TYPES,
+   createAlertMonitor, checkSymbol
+  };
  }
  global.BearFishBackgroundRateLimit = { createReservationService, attachRuntimeListener, RESERVE_MESSAGE_TYPE };
 })(typeof globalThis !== "undefined" ? globalThis : this);

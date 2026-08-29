@@ -6,12 +6,24 @@ const BUILTINS={
  "Momentum":{sma:{enabled:false,period:20},ema:{enabled:true,period:12},volume:true,rsi:{enabled:true,period:14},macd:{enabled:true,fast:12,slow:26,signal:9}},
  "Full":{sma:{enabled:true,period:20},ema:{enabled:true,period:20},volume:true,rsi:{enabled:true,period:14},macd:{enabled:true,fast:12,slow:26,signal:9}}
 };
-let prefs={},customPresets={},theme="slate",alertsStore={};
+let prefs={},customPresets={},theme="slate",alertsList=[];
 $("symbol").textContent=symbol;
 
-function alertsForSymbol(){return alertsStore[symbol]||[]}
-function renderAlerts(){
- const list=alertsForSymbol();
+const ALERT_MSG={list:"bearfish:alerts:list",add:"bearfish:alerts:add",remove:"bearfish:alerts:remove",setEnabled:"bearfish:alerts:setEnabled"};
+
+/* Alerts are owned by the background page's single serialized store, not
+   by this page: every add/delete/toggle is sent as a runtime message and
+   the UI always re-renders from the response, so a concurrent change made
+   by the monitor (or another open editor) can never be clobbered by a
+   stale in-page copy being written back wholesale. */
+async function fetchAlerts(){
+ try{
+  const res=await browser.runtime.sendMessage({type:ALERT_MSG.list,symbol});
+  return(res&&res.ok&&Array.isArray(res.list))?res.list:[];
+ }catch(e){return[]}
+}
+function renderAlerts(list){
+ alertsList=list;
  const ul=$("alertList");ul.textContent="";
  $("alertEmpty").classList.toggle("hidden",list.length>0);
  list.forEach(a=>{
@@ -19,14 +31,21 @@ function renderAlerts(){
   const desc=document.createElement("span");desc.className="alert-desc";desc.textContent=BearFishAlerts.describeAlert(a);
   const toggle=document.createElement("label");toggle.className="switch";
   const cb=document.createElement("input");cb.type="checkbox";cb.checked=a.enabled;
-  cb.onchange=async()=>{a.enabled=cb.checked;await saveAlerts();$("status").textContent=`${a.enabled?"Enabled":"Disabled"} alert for ${symbol}.`};
+  cb.onchange=async()=>{
+   const res=await browser.runtime.sendMessage({type:ALERT_MSG.setEnabled,symbol,id:a.id,enabled:cb.checked});
+   if(res&&res.ok){renderAlerts(res.list);$("status").textContent=`${cb.checked?"Enabled":"Disabled"} alert for ${symbol}.`}
+   else{cb.checked=!cb.checked;$("status").textContent=(res&&res.error)||"Unable to update alert."}
+  };
   toggle.append(cb);
   const del=document.createElement("button");del.textContent="delete";
-  del.onclick=async()=>{alertsStore[symbol]=alertsForSymbol().filter(x=>x.id!==a.id);await saveAlerts();renderAlerts();$("status").textContent=`Deleted alert for ${symbol}.`};
+  del.onclick=async()=>{
+   const res=await browser.runtime.sendMessage({type:ALERT_MSG.remove,symbol,id:a.id});
+   if(res&&res.ok){renderAlerts(res.list);$("status").textContent=`Deleted alert for ${symbol}.`}
+   else{$("status").textContent=(res&&res.error)||"Unable to delete alert."}
+  };
   li.append(desc,toggle,del);ul.append(li)
  });
 }
-async function saveAlerts(){await browser.storage.local.set({stockAlerts:alertsStore})}
 $("addAlertBtn").onclick=async()=>{
  const input={
   type:$("alertType").value,
@@ -35,10 +54,10 @@ $("addAlertBtn").onclick=async()=>{
  };
  const check=BearFishAlerts.validateAlertInput(input);
  if(!check.ok){$("alertStatus").textContent=check.error;return}
- const list=alertsForSymbol();
- if(list.length>=10){$("alertStatus").textContent="Delete an alert before adding another.";return}
- list.push(check.alert);alertsStore[symbol]=list;
- await saveAlerts();renderAlerts();
+ if(alertsList.length>=10){$("alertStatus").textContent="Delete an alert before adding another.";return}
+ const res=await browser.runtime.sendMessage({type:ALERT_MSG.add,symbol,input});
+ if(!res||!res.ok){$("alertStatus").textContent=(res&&res.error)||"Unable to add alert.";return}
+ renderAlerts(res.list);
  $("alertValue").value="";$("alertStatus").textContent="";$("status").textContent=`Added alert for ${symbol}.`
 };
 $("alertType").addEventListener("change",()=>{
@@ -109,11 +128,11 @@ $("deletePresetBtn").onclick=async()=>{
 $("closeBtn").onclick=()=>window.close();
 
 (async()=>{
- const d=await browser.storage.local.get(["stockPrefs","indicatorPresets","theme","stockAlerts"]);
+ const d=await browser.storage.local.get(["stockPrefs","indicatorPresets","theme"]);
  prefs=d.stockPrefs&&typeof d.stockPrefs==="object"?d.stockPrefs:{};
  customPresets=d.indicatorPresets&&typeof d.indicatorPresets==="object"?d.indicatorPresets:{};
  theme=["slate","forest","cream","terminal","midnight"].includes(d.theme)?d.theme:"slate";
- alertsStore=BearFishAlerts.sanitizeStore(d.stockAlerts);
- document.body.dataset.theme=theme;renderForm();renderPresets();renderAlerts();
+ document.body.dataset.theme=theme;renderForm();renderPresets();
+ renderAlerts(await fetchAlerts());
  $("alertRsiPeriod").classList.toggle("hidden",!BearFishAlerts.isRsiType($("alertType").value));
 })();
