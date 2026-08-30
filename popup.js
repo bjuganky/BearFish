@@ -2,6 +2,8 @@ const MAX_LISTS=5,$=id=>document.getElementById(id);
 let lists=[],activeId="",quotes={},apiKey="",theme="slate";
 let searchTimer=null,searchSeq=0,searchItems=[],selectedSearchIndex=-1,expandedSymbol=null;
 let inlineData={},prefs={},indicatorPresets={};
+let viewportAnchor={},olderFetch={},olderDebounce={};
+const VP=globalThis.BearFishViewport;
 
 function makeId(){return"wl_"+Date.now()+"_"+Math.random().toString(36).slice(2,7)}
 function defaultState(){const id=makeId();return[{id,name:"Watchlist 1",stocks:[]}]}
@@ -73,14 +75,16 @@ function render(){
   const pr=document.createElement("div");pr.className="price";pr.textContent=q?money(q.close):"—";
   const ch=document.createElement("div");ch.className="change "+(!q?"muted":Number(q.percent_change)>=0?"up":"down");ch.textContent=q?`${Number(q.percent_change)>=0?"+":""}${Number(q.percent_change).toFixed(2)}%`:"not loaded";
   qt.append(pr,ch);main.append(chev,sy,co,qt);
-  const toggle=()=>{if(expandedSymbol===sym){stopLive(sym);expandedSymbol=null}else{if(expandedSymbol)stopLive(expandedSymbol);expandedSymbol=sym}render();if(expandedSymbol===sym)requestAnimationFrame(()=>loadInlineData(sym,false))};
+  const toggle=()=>{if(expandedSymbol===sym){stopLive(sym);expandedSymbol=null}else{if(expandedSymbol)stopLive(expandedSymbol);expandedSymbol=sym;resetViewport(sym)}render();if(expandedSymbol===sym)requestAnimationFrame(()=>loadInlineData(sym,false))};
   main.onclick=toggle;main.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();toggle()}};
-  const rm=document.createElement("button");rm.className="remove";rm.textContent="×";rm.title="Remove "+sym;rm.onclick=async e=>{e.stopPropagation();activeList().stocks=activeList().stocks.filter(x=>x.symbol!==sym);if(expandedSymbol===sym){stopLive(sym);expandedSymbol=null}delete inlineData[sym];await persist();render()};
+  const rm=document.createElement("button");rm.className="remove";rm.textContent="×";rm.title="Remove "+sym;rm.onclick=async e=>{e.stopPropagation();activeList().stocks=activeList().stocks.filter(x=>x.symbol!==sym);if(expandedSymbol===sym){stopLive(sym);expandedSymbol=null}delete inlineData[sym];resetViewport(sym);await persist();render()};
   row.append(main,rm);li.append(row);if(expandedSymbol===sym)li.append(buildInlinePanel(stock));ul.append(li)
  }
 }
+function resetViewport(sym){delete viewportAnchor[sym];delete olderFetch[sym];clearTimeout(olderDebounce[sym]);delete olderDebounce[sym]}
+function chartSpanMs(p){return VP.windowDurationMs(p.windowValue,p.windowUnit)}
 function preset(sym,value,unit){
- const p=stockPref(sym);p.windowValue=value;p.windowUnit=unit;p.barInterval="auto";delete inlineData[sym];persist().then(()=>{render();requestAnimationFrame(()=>loadInlineData(sym,true))})
+ const p=stockPref(sym);p.windowValue=value;p.windowUnit=unit;p.barInterval="auto";delete inlineData[sym];resetViewport(sym);persist().then(()=>{render();requestAnimationFrame(()=>loadInlineData(sym,true))})
 }
 function buildInlinePanel(stock){
  const sym=stock.symbol,p=stockPref(sym),panel=document.createElement("section");panel.className="inline-panel";
@@ -109,7 +113,7 @@ function buildInlinePanel(stock){
   const o=document.createElement("option");o.value=u;o.textContent=u;if(u===p.windowUnit)o.selected=true;unit.append(o)
  });
  const apply=document.createElement("button");apply.type="button";apply.textContent="APPLY";
- apply.onclick=async()=>{p.windowValue=Math.max(1,Math.min(5000,Number(num.value)||1));p.windowUnit=unit.value;delete inlineData[sym];stopLive(sym);await persist();render();requestAnimationFrame(()=>loadInlineData(sym,true))};
+ apply.onclick=async()=>{p.windowValue=Math.max(1,Math.min(5000,Number(num.value)||1));p.windowUnit=unit.value;delete inlineData[sym];resetViewport(sym);stopLive(sym);await persist();render();requestAnimationFrame(()=>loadInlineData(sym,true))};
 
  const bar=document.createElement("div");bar.className="bar-interval";
  const bl=document.createElement("span");bl.className="section-label";bl.textContent="BAR";
@@ -117,13 +121,29 @@ function buildInlinePanel(stock){
  ["auto","5s","15s","30s","1min","5min","15min","30min","1h","4h","1day","1week","1month"].forEach(v=>{
   const o=document.createElement("option");o.value=v;o.textContent=v==="auto"?"Auto":v;if(v===p.barInterval)o.selected=true;bs.append(o)
  });
- bs.onchange=async()=>{p.barInterval=bs.value;delete inlineData[sym];stopLive(sym);await persist();requestAnimationFrame(()=>loadInlineData(sym,true))};
+ bs.onchange=async()=>{p.barInterval=bs.value;delete inlineData[sym];resetViewport(sym);stopLive(sym);await persist();requestAnimationFrame(()=>loadInlineData(sym,true))};
  bar.append(bl,bs);time.append(lab,num,unit,apply,bar);
 
  const wrap=document.createElement("div");wrap.className="inline-chart-wrap";
  const canvas=document.createElement("canvas");canvas.className="inline-chart";canvas.id="inline-chart-"+sym;
  const status=document.createElement("div");status.className="inline-chart-status";status.id="inline-status-"+sym;
  const d=inlineData[sym];status.textContent=d?.loading?"Loading…":d?.error?d.error:d?.series?.length?"":"Loading when opened…";wrap.append(canvas,status);
+
+ const viewport=document.createElement("div");viewport.className="chart-viewport hidden";viewport.id="viewport-"+sym;
+ const slider=document.createElement("input");slider.type="range";slider.className="viewport-slider";slider.id="viewport-slider-"+sym;
+ slider.min="0";slider.max="0";slider.value="0";slider.setAttribute("aria-label",`${sym} chart history position`);
+ const nowBtn=document.createElement("button");nowBtn.type="button";nowBtn.className="viewport-now hidden";nowBtn.id="viewport-now-"+sym;nowBtn.textContent="⏵ NOW";nowBtn.title="Jump to latest data";
+ const sliderRow=document.createElement("div");sliderRow.className="viewport-slider-row";sliderRow.append(slider,nowBtn);
+ const badge=document.createElement("span");badge.className="viewport-status";badge.id="viewport-status-"+sym;badge.textContent="LATEST";
+ const rangeLabel=document.createElement("span");rangeLabel.className="viewport-range";rangeLabel.id="viewport-range-"+sym;
+ const infoRow=document.createElement("div");infoRow.className="viewport-info-row";infoRow.append(badge,rangeLabel);
+ viewport.append(sliderRow,infoRow);
+ slider.oninput=()=>onViewportSlide(sym,Number(slider.value));
+ slider.onkeydown=e=>{
+  if(e.key==="Home"){e.preventDefault();slider.value=slider.min;onViewportSlide(sym,Number(slider.min))}
+  else if(e.key==="End"){e.preventDefault();slider.value=slider.max;onViewportSlide(sym,Number(slider.max))}
+ };
+ nowBtn.onclick=()=>jumpToLatest(sym);
 
  const presetRow=document.createElement("div");presetRow.className="preset-row";
  const presetLabel=document.createElement("label");presetLabel.textContent="INDICATORS";
@@ -149,7 +169,7 @@ function buildInlinePanel(stock){
  const edit=document.createElement("button");edit.type="button";edit.textContent="EDIT…";
  edit.onclick=()=>browser.windows.create({url:browser.runtime.getURL("indicator.html?symbol="+encodeURIComponent(sym)),type:"popup",width:520,height:650});
  presetRow.append(presetLabel,presetSelect,edit);
- panel.append(toolbar,time,wrap,presetRow);
+ panel.append(toolbar,time,wrap,viewport,presetRow);
 
  if(p.rsi.enabled){
   const sec=document.createElement("div");sec.className="inline-subpanel";
@@ -165,7 +185,7 @@ function buildInlinePanel(stock){
  const actions=document.createElement("div");actions.className="inline-actions";
  const meta=document.createElement("span");meta.className="inline-meta";meta.id="inline-meta-"+sym;meta.textContent=stock.exchange||stock.name||sym;
  const live=document.createElement("span");live.className="live-badge hidden";live.id="live-badge-"+sym;live.innerHTML='<span class="live-dot"></span><span>LIVE SESSION</span>';
- const reload=document.createElement("button");reload.type="button";reload.textContent="UPDATE";reload.onclick=()=>loadInlineData(sym,true);
+ const reload=document.createElement("button");reload.type="button";reload.textContent="UPDATE";reload.onclick=()=>{resetViewport(sym);loadInlineData(sym,true)};
  const full=document.createElement("button");full.type="button";full.className="full-page";full.textContent="FULL PAGE";full.onclick=()=>browser.tabs.create({url:browser.runtime.getURL("details.html?symbol="+encodeURIComponent(sym))});
  actions.append(meta,live,reload,full);panel.append(actions);return panel
 }
@@ -254,9 +274,43 @@ function startLive(sym,interval){
  ws.onerror=()=>failToRest("Live stream unavailable.");
  ws.onclose=()=>{const b=$("live-badge-"+sym);if(b)b.classList.remove("connected")};
 }
-async function fetchSeries(sym,interval,count){
+async function fetchSeries(sym,interval,count,endDate){
  const u=new URL("https://api.twelvedata.com/time_series");u.searchParams.set("symbol",sym);u.searchParams.set("interval",interval);u.searchParams.set("outputsize",String(count));u.searchParams.set("apikey",apiKey);
+ if(endDate)u.searchParams.set("end_date",endDate);
  const {r,d}=await limitedJson(u);if(!r.ok||d.status==="error"||!Array.isArray(d.values)){const e=new Error(d.message||`Unable to load ${interval} data`);e.code=d.code||r.status;e.raw=d;throw e}return d
+}
+function onViewportSlide(sym,ms){
+ const d=inlineData[sym];if(!d?.series?.length)return;
+ const slider=$("viewport-slider-"+sym),atMax=slider&&Number(slider.max)===ms;
+ viewportAnchor[sym]=atMax?null:VP.clampAnchorMs(d.series,ms);
+ drawInline(sym)
+}
+function jumpToLatest(sym){delete viewportAnchor[sym];drawInline(sym)}
+function maybeLoadOlderData(sym){clearTimeout(olderDebounce[sym]);olderDebounce[sym]=setTimeout(()=>loadOlderData(sym),400)}
+async function loadOlderData(sym){
+ const d=inlineData[sym],p=stockPref(sym);
+ if(!d?.series?.length||d.live||isSecondInterval(d.interval))return;
+ const state=olderFetch[sym]||(olderFetch[sym]={loading:false,exhausted:false});
+ if(state.loading||state.exhausted)return;
+ const span=chartSpanMs(p),anchor=VP.clampAnchorMs(d.series,viewportAnchor[sym]??null);
+ if(!VP.needsOlderData(d.series,anchor,span))return;
+ const oldestMs=VP.barTimeMs(d.series[0]);
+ if(!Number.isFinite(oldestMs))return;
+ state.loading=true;
+ try{
+  const count=Math.max(20,Math.min(1000,requestedBars(p,d.interval)));
+  const endDate=new Date(oldestMs-1000).toISOString().replace("T"," ").slice(0,19);
+  const res=await fetchSeries(sym,d.interval,count,endDate);
+  const older=[...res.values].reverse().map(v=>({t:v.datetime,o:+v.open,h:+v.high,l:+v.low,c:+v.close,v:+(v.volume||0)})).filter(x=>[x.o,x.h,x.l,x.c].every(Number.isFinite));
+  const seen=new Set(d.series.map(b=>b.t)),added=older.filter(b=>!seen.has(b.t));
+  if(!added.length)state.exhausted=true;
+  else{
+   const merged=added.concat(d.series).sort((a,b)=>VP.barTimeMs(a)-VP.barTimeMs(b));
+   inlineData[sym]={...d,series:merged}
+  }
+  if(expandedSymbol===sym)drawInline(sym)
+ }catch(e){state.exhausted=true}
+ finally{state.loading=false}
 }
 async function loadInlineData(sym,force){
  if(expandedSymbol!==sym)return;
@@ -310,10 +364,40 @@ function prep(canvas,h){const d=devicePixelRatio||1,w=Math.max(300,canvas.client
 function path(c,arr,x,y,color,w=1.1){c.strokeStyle=color;c.lineWidth=w;c.beginPath();let s=false;arr.forEach((v,i)=>{if(!Number.isFinite(v))return;s?c.lineTo(x(i),y(v)):c.moveTo(x(i),y(v));s=true});c.stroke()}
 function css(name){return getComputedStyle(document.body).getPropertyValue(name).trim()}
 function drawInline(sym){
- if(expandedSymbol!==sym)return;const d=inlineData[sym],canvas=$("inline-chart-"+sym),status=$("inline-status-"+sym);if(!canvas)return;if(!d?.series?.length){if(status&&!d?.loading)status.textContent=d?.error||"Loading when opened…";return}if(status)status.textContent="";
- const p=stockPref(sym),series=d.series,[c,w,h]=prep(canvas,canvas.clientHeight||220),pad={l:42,r:7,t:7,b:17},priceBottom=p.volume?h*.76:h-pad.b,closes=series.map(x=>x.c),over=[];
- if(p.sma.enabled)over.push([sma(closes,p.sma.period),"#aeb5bd"]);if(p.ema.enabled)over.push([ema(closes,p.ema.period),"#648bc0"]);
- const vals=series.flatMap(q=>[q.h,q.l]).concat(over.flatMap(o=>o[0].filter(Number.isFinite)));let min=Math.min(...vals),max=Math.max(...vals),span=max-min||1;min-=span*.03;max+=span*.03;
+ if(expandedSymbol!==sym)return;
+ const d=inlineData[sym],canvas=$("inline-chart-"+sym),status=$("inline-status-"+sym),
+       vpBar=$("viewport-"+sym),slider=$("viewport-slider-"+sym),nowBtn=$("viewport-now-"+sym),
+       badge=$("viewport-status-"+sym),rangeLabel=$("viewport-range-"+sym);
+ if(!canvas)return;
+ if(!d?.series?.length){if(status&&!d?.loading)status.textContent=d?.error||"Loading when opened…";if(vpBar)vpBar.classList.add("hidden");return}
+ if(status)status.textContent="";
+ const p=stockPref(sym),buffer=d.series,span=chartSpanMs(p),bounds=VP.seriesBounds(buffer),
+       requestedAnchor=viewportAnchor[sym]??null,
+       anchor=VP.clampAnchorMs(buffer,requestedAnchor),
+       {startIdx,endIdx,windowStartMs,windowEndMs}=VP.sliceViewport(buffer,anchor,span),
+       series=buffer.slice(startIdx,endIdx+1),
+       history=buffer.slice(0,endIdx+1),
+       atLatest=VP.isAtLatest(buffer,requestedAnchor);
+
+ if(vpBar){
+  const enoughHistory=!!bounds&&bounds.last>bounds.first;
+  vpBar.classList.toggle("hidden",!enoughHistory);
+  if(enoughHistory&&slider){slider.min=String(bounds.first);slider.max=String(bounds.last);slider.value=String(anchor)}
+ }
+ if(badge){
+  const lastMs=VP.barTimeMs(buffer[buffer.length-1]),fresh=Number.isFinite(lastMs)&&(Date.now()-lastMs)<Math.max(span,60000)*2;
+  const label=VP.statusLabel({atLatest,liveConnected:!!d.live,fresh});
+  badge.textContent=label;badge.classList.toggle("historical",label==="HISTORY");badge.classList.toggle("live",label==="LIVE")
+ }
+ if(rangeLabel)rangeLabel.textContent=VP.formatRange(windowStartMs,windowEndMs);
+ if(nowBtn)nowBtn.classList.toggle("hidden",atLatest);
+
+ const [c,w,h]=prep(canvas,canvas.clientHeight||220),pad={l:42,r:7,t:7,b:17},priceBottom=p.volume?h*.76:h-pad.b;
+ const closesHistory=history.map(x=>x.c),overFull=[];
+ if(p.sma.enabled)overFull.push([sma(closesHistory,p.sma.period),"#aeb5bd"]);
+ if(p.ema.enabled)overFull.push([ema(closesHistory,p.ema.period),"#648bc0"]);
+ const over=overFull.map(([arr,color])=>[arr.slice(startIdx,endIdx+1),color]),closes=series.map(x=>x.c);
+ const vals=series.flatMap(q=>[q.h,q.l]).concat(over.flatMap(o=>o[0].filter(Number.isFinite)));let min=Math.min(...vals),max=Math.max(...vals),priceSpan=max-min||1;min-=priceSpan*.03;max+=priceSpan*.03;
  const plotW=w-pad.l-pad.r;
  const naturalSlot=series.length?plotW/series.length:plotW;
  const slot=Math.min(28,naturalSlot);
@@ -328,11 +412,24 @@ function drawInline(sym){
  }
  over.forEach(o=>path(c,o[0],x,y,o[1],1.05));
  if(p.volume){const vmax=Math.max(...series.map(q=>q.v),1),base=h-pad.b,top=h*.80,spacing=slot,bw=Math.max(3,Math.min(18,spacing*.74));series.forEach((q,i)=>{const bh=q.v/vmax*(base-top);c.globalAlpha=.42;c.fillStyle=q.c>=q.o?css("--up"):css("--down");c.fillRect(x(i)-bw/2,base-bh,bw,bh)});c.globalAlpha=1}
- const meta=$("inline-meta-"+sym);if(meta)meta.textContent=`${d.interval}${d.fallback?" · intraday unavailable, daily fallback":""} · ${series.length} bars`;
- if(p.rsi.enabled)drawRSI(sym,series);if(p.macd.enabled)drawMACD(sym,series)
+ const meta=$("inline-meta-"+sym);if(meta)meta.textContent=`${d.interval}${d.fallback?" · intraday unavailable, daily fallback":""} · ${series.length} of ${buffer.length} bars`;
+ if(p.rsi.enabled)drawRSI(sym,history,startIdx,endIdx);if(p.macd.enabled)drawMACD(sym,history,startIdx,endIdx);
+ if(!atLatest)maybeLoadOlderData(sym)
 }
-function drawRSI(sym,series){const can=$("rsi-"+sym);if(!can)return;const vals=rsi(series.map(x=>x.c),stockPref(sym).rsi.period),[c,w,h]=prep(can,74),pad={l:42,r:7,t:5,b:9},x=i=>pad.l+i/Math.max(1,series.length-1)*(w-pad.l-pad.r),y=v=>pad.t+(100-v)/100*(h-pad.t-pad.b);c.strokeStyle=css("--line2");[30,70].forEach(v=>{c.beginPath();c.moveTo(pad.l,y(v));c.lineTo(w-pad.r,y(v));c.stroke()});path(c,vals,x,y,css("--accent"),1);const last=[...vals].reverse().find(Number.isFinite),el=$("rsi-value-"+sym);if(el)el.textContent=Number.isFinite(last)?last.toFixed(1):"—"}
-function drawMACD(sym,series){const can=$("macd-"+sym);if(!can)return;const mp=stockPref(sym).macd,z=macd(series.map(x=>x.c),mp.fast,mp.slow,mp.signal),valid=[...z.m,...z.sig,...z.hist].filter(Number.isFinite);if(!valid.length)return;const[c,w,h]=prep(can,74),pad={l:42,r:7,t:5,b:9};let min=Math.min(...valid,0),max=Math.max(...valid,0),span=max-min||1;min-=span*.1;max+=span*.1;const x=i=>pad.l+i/Math.max(1,series.length-1)*(w-pad.l-pad.r),y=v=>pad.t+(max-v)/(max-min)*(h-pad.t-pad.b),spacing=(w-pad.l-pad.r)/Math.max(1,series.length-1),bw=Math.max(2,Math.min(9,spacing*.7));z.hist.forEach((v,i)=>{if(!Number.isFinite(v))return;c.globalAlpha=.45;c.fillStyle=v>=0?css("--up"):css("--down");const yy=y(v),zero=y(0);c.fillRect(x(i)-bw/2,Math.min(yy,zero),bw,Math.max(1,Math.abs(zero-yy)))});c.globalAlpha=1;path(c,z.m,x,y,css("--text"),1);path(c,z.sig,x,y,css("--accent"),1);const last=[...z.m].reverse().find(Number.isFinite),el=$("macd-value-"+sym);if(el)el.textContent=Number.isFinite(last)?last.toFixed(3):"—"}
+function drawRSI(sym,history,startIdx,endIdx){
+ const can=$("rsi-"+sym);if(!can)return;
+ const valsFull=rsi(history.map(x=>x.c),stockPref(sym).rsi.period),vals=valsFull.slice(startIdx,endIdx+1),len=Math.max(1,endIdx-startIdx),
+       [c,w,h]=prep(can,74),pad={l:42,r:7,t:5,b:9},x=i=>pad.l+i/len*(w-pad.l-pad.r),y=v=>pad.t+(100-v)/100*(h-pad.t-pad.b);
+ c.strokeStyle=css("--line2");[30,70].forEach(v=>{c.beginPath();c.moveTo(pad.l,y(v));c.lineTo(w-pad.r,y(v));c.stroke()});path(c,vals,x,y,css("--accent"),1);const last=[...vals].reverse().find(Number.isFinite),el=$("rsi-value-"+sym);if(el)el.textContent=Number.isFinite(last)?last.toFixed(1):"—"
+}
+function drawMACD(sym,history,startIdx,endIdx){
+ const can=$("macd-"+sym);if(!can)return;const mp=stockPref(sym).macd,zFull=macd(history.map(x=>x.c),mp.fast,mp.slow,mp.signal),
+       z={m:zFull.m.slice(startIdx,endIdx+1),sig:zFull.sig.slice(startIdx,endIdx+1),hist:zFull.hist.slice(startIdx,endIdx+1)},
+       valid=[...z.m,...z.sig,...z.hist].filter(Number.isFinite);if(!valid.length)return;
+ const[c,w,h]=prep(can,74),pad={l:42,r:7,t:5,b:9};let min=Math.min(...valid,0),max=Math.max(...valid,0),macdSpan=max-min||1;min-=macdSpan*.1;max+=macdSpan*.1;
+ const len=Math.max(1,endIdx-startIdx),x=i=>pad.l+i/len*(w-pad.l-pad.r),y=v=>pad.t+(max-v)/(max-min)*(h-pad.t-pad.b),spacing=(w-pad.l-pad.r)/len,bw=Math.max(2,Math.min(9,spacing*.7));
+ z.hist.forEach((v,i)=>{if(!Number.isFinite(v))return;c.globalAlpha=.45;c.fillStyle=v>=0?css("--up"):css("--down");const yy=y(v),zero=y(0);c.fillRect(x(i)-bw/2,Math.min(yy,zero),bw,Math.max(1,Math.abs(zero-yy)))});c.globalAlpha=1;path(c,z.m,x,y,css("--text"),1);path(c,z.sig,x,y,css("--accent"),1);const last=[...z.m].reverse().find(Number.isFinite),el=$("macd-value-"+sym);if(el)el.textContent=Number.isFinite(last)?last.toFixed(3):"—"
+}
 
 function clearSearchResults(){searchItems=[];selectedSearchIndex=-1;$("searchResults").textContent="";$("searchResults").classList.add("hidden")}
 function setSearchHint(t,e=false){$("searchHint").textContent=t;$("searchHint").classList.toggle("error",e)}
@@ -353,9 +450,9 @@ async function loadQuotes(){const wl=activeList();if(!apiKey){$("settingsPanel")
  document.querySelectorAll("[data-theme-choice]").forEach(b=>b.onclick=async()=>{theme=b.dataset.themeChoice;applyTheme();await persist();if(expandedSymbol)requestAnimationFrame(()=>drawInline(expandedSymbol))});
  $("settingsBtn").onclick=()=>{$("settingsPanel").classList.toggle("hidden");$("themePanel").classList.add("hidden")};
  $("saveKeyBtn").onclick=async()=>{apiKey=$("apiKey").value.trim();await browser.storage.local.set({apiKey});$("status").textContent=apiKey?"API key saved.":"API key cleared."};
- $("watchlistSelect").onchange=async e=>{if(expandedSymbol)stopLive(expandedSymbol);activeId=e.target.value;quotes={};expandedSymbol=null;inlineData={};await persist();render()};
+ $("watchlistSelect").onchange=async e=>{if(expandedSymbol)stopLive(expandedSymbol);activeId=e.target.value;quotes={};expandedSymbol=null;inlineData={};viewportAnchor={};olderFetch={};await persist();render()};
  $("newListBtn").onclick=async()=>{if(lists.length>=MAX_LISTS)return;const id=makeId();lists.push({id,name:`Watchlist ${lists.length+1}`,stocks:[]});activeId=id;expandedSymbol=null;await persist();render()};
- $("deleteListBtn").onclick=async()=>{if(lists.length<=1)return;const i=lists.findIndex(x=>x.id===activeId);lists=lists.filter(x=>x.id!==activeId);activeId=lists[Math.max(0,i-1)]?.id||lists[0].id;expandedSymbol=null;inlineData={};await persist();render()};
+ $("deleteListBtn").onclick=async()=>{if(lists.length<=1)return;const i=lists.findIndex(x=>x.id===activeId);lists=lists.filter(x=>x.id!==activeId);activeId=lists[Math.max(0,i-1)]?.id||lists[0].id;expandedSymbol=null;inlineData={};viewportAnchor={};olderFetch={};await persist();render()};
  $("renameBtn").onclick=()=>{$("renameInput").value=activeList().name;$("renameForm").classList.remove("hidden");$("renameInput").focus();$("renameInput").select()};
  $("cancelRenameBtn").onclick=()=>$("renameForm").classList.add("hidden");
  $("renameForm").onsubmit=async e=>{e.preventDefault();const n=$("renameInput").value.trim().slice(0,24);if(!n)return;activeList().name=n;await persist();$("renameForm").classList.add("hidden");render()};
