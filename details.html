@@ -14,7 +14,15 @@
  <div class="ranges"><button data-range="1D">1D</button><button data-range="5D">5D</button><button data-range="1M" class="active">1M</button><button data-range="3M">3M</button><button data-range="1Y">1Y</button></div>
  <div class="views"><span>VIEW</span><button data-view="candle" class="active">CANDLES</button><button data-view="line">LINE</button></div>
 </div>
-<section class="plot"><canvas id="chart"></canvas><div id="chartStatus">No market data loaded.</div></section>
+<section class="plot"><canvas id="chart"></canvas><div id="chartStatus">No market data loaded.</div>
+ <div id="viewport" class="chart-viewport hidden">
+  <div class="viewport-slider-row">
+   <input id="viewportSlider" class="viewport-slider" type="range" min="0" max="0" value="0" aria-label="Chart history position">
+   <button id="viewportNow" type="button" class="viewport-now hidden" title="Jump to latest data">⏵ NOW</button>
+  </div>
+  <div class="viewport-info-row"><span id="viewportStatus" class="viewport-status">LATEST</span><span id="viewportRange" class="viewport-range"></span></div>
+ </div>
+</section>
 <section class="tools">
  <div class="tool-title">OVERLAYS</div>
  <label><input id="sma20" type="checkbox"> SMA 20</label><label><input id="sma50" type="checkbox"> SMA 50</label><label><input id="ema20" type="checkbox"> EMA 20</label><label><input id="volumeToggle" type="checkbox" checked> Volume</label>
@@ -23,4 +31,4 @@
 </section>
 <section id="rsiPanel" class="indicator hidden"><div class="indicator-head"><span>RSI (14)</span><span id="rsiValue">—</span></div><canvas id="rsiChart"></canvas></section>
 <section id="macdPanel" class="indicator hidden"><div class="indicator-head"><span>MACD (12,26,9)</span><span id="macdValue">—</span></div><canvas id="macdChart"></canvas></section>
-</main><script src="rateLimit.js"></script><script src="details.js"></script></body></html>
+</main><script src="rateLimit.js"></script><script src="chartViewport.js"></script><script src="details.js"></script></body></html>
