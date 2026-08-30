@@ -5,7 +5,7 @@ on:
     types: [opened, synchronize, edited, reopened]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
@@ -20,6 +20,6 @@ jobs:
     steps:
       - name: Mark pull request ready for review
         env:
-          GH_TOKEN: ${{ secrets.READY_PR_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: gh pr ready "$PR_URL"
